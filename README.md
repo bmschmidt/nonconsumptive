@@ -20,7 +20,9 @@ between processes to allow fast serialization, deserialization, and storage.
 
 For long-term archival deposit, it will be possible to export corpora as linked open data formatted as JSON and/or XML.
 
+## Code strategies
 
+All internal data representations should use the Apache Arrow file format for internal transfer and parquet for storage. These formats preserve types and allow binding of metadata to tables, and so present a much more efficient way of storing data. Export to CSV and/or JSON for archival purposes will be supported on the condition that you say out loud three times the phrase "JSON is a fine storage format, but it's a lousy interchange format."
 
 ## Legal disclaimer
 
