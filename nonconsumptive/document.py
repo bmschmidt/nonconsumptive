@@ -6,6 +6,7 @@ import re
 import json
 from pathlib import Path
 import gzip
+from .wordcounting import chunked_wordcounts
 
 class Document(object):
 
@@ -45,6 +46,10 @@ class Document(object):
   def tokens(self) -> List[str]:
     return re.findall("[\w^_]+|[^\w\s]+", self.full_text)
 
+  def ngrams(self, n) -> List[Tuple[str]]:
+      vars = [self.tokens[n-i:i-n-1] for i in range(0, n)]
+      return zip(*vars)
+
   def __repr__(self):
     return str(self)
 
@@ -55,12 +60,17 @@ class Document(object):
   def metadata(self):
     return self.corpus.metadata.get(self.id)
 
-
  # def tokenize(self): 
  #   """
  #   Returns the tokens of the document as an arrow list.
  #   """
  #   return pa.list_(self.tokens)
+  def chunked_wordcounts(self, chunk_size) -> pa.RecordBatch:
+    """
+    As with the core elements 
+    """
+    return chunked_wordcounts(self.tokens, chunk_size)
+
 
   @cached_property
   def wordcounts(self) -> pa.RecordBatch:
