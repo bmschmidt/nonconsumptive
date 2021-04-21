@@ -5,7 +5,10 @@ from pyarrow import feather
 import pyarrow as pa
 import json
 import yaml
-
+import uuid
+import numpy as np
+from .prefs import prefs
+import logging
 from .metadata import Metadata
 import gzip
 
@@ -16,32 +19,23 @@ from typing import Callable, Iterator, Union, Optional, List
 _Path = Union[str, Path]
 
 class Corpus():
-  def __init__(self, dir, prefs = None):
-    self.root = Path(dir)
-    if prefs is not None:
-      self.prefs = prefs
-    else:
-      self.load_prefs()
-    self.metadata = Metadata.from_file(self, self.prefs['paths']['metadata_file'])
+  def __init__(self, dir):
+    self.root: Path = Path(dir)
+    mf = prefs('paths.metadata_file')
+    self.metadata: Metadata = Metadata.from_file(self, mf)
     parquet.write_table(self.metadata.tb, self.root / "metadata_derived.parquet")
-    self.text_location = self.root / self.prefs['paths']['text_files']
-  
-  def load_prefs(self):
-     dir = self.root
-     if (dir / "nc.yaml").exists():
-         self.prefs = yaml.safe_load((dir / "nc.yaml").open())
-     else:
-         self.prefs = {
-            "paths": {
-              "text_files": "texts",
-              "metadata_file": None,
-              "feature_counts": "feature_counts",
-              "SRP": None
-            }
-         }
-     
+    self.text_location = self.root / prefs('paths.text_files')
+
   def top_n_words(self, n = 1_000_000):
     pass
+
+  @property 
+  def tokenization(self):
+
+    tokenizer = Tokenization(self)
+    if tokenizer.empty():
+      tokenizer.create()
+    return tokenizer
 
   def encode_feature_counts(self, dictionary: dict):
     """
@@ -49,11 +43,20 @@ class Corpus():
     """
     pass
 
+  def path_to(self, id):
+    p1 = self.root / ("texts/" + id + ".txt.gz")
+    if p1.exists():
+      return p1
+    raise FileNotFoundError("HMM")
+
   def documents(self):
       # Just an alias for now.
       for document in self.documents_from_files():
           yield document
-    
+
+  def get_document(self, id):
+    return Document(self, id)
+
   def feature_counts(self, dir = None):
     if dir is None:
       dir = self.root / "feature_counts"
@@ -66,7 +69,7 @@ class Corpus():
     dir: Union[str, Path],
     single_files:bool = True,
     chunk_size:Optional[int] = None,
-    batch_size:int = 50_000_000):
+    batch_size:int = 250_000_000):
     """
     Write feature counts with metadata for all files in the document.
 
@@ -107,9 +110,11 @@ class Corpus():
     return doc
 
   def files(self) -> Iterator[Path]:
-    print(self.text_location)
     for path in self.text_location.glob("*.txt*"):
       yield path
+
+  def documents_from_metadata(self) -> Iterator[Document]:
+    pass
 
   def documents_from_files(self) -> Iterator[Document]:
     """
@@ -117,3 +122,64 @@ class Corpus():
     """
     for document in self.files():
       yield Document(self, path=document)
+
+class Tokenization():
+
+  def __init__(self, corpus: Corpus, path: Optional[Path] = None):
+    self.corpus = corpus
+    if path is None:
+      path = corpus.root / "tokenized"
+    path.mkdir(exist_ok=True)
+    self.path = path
+
+  def clean(self):
+    for p in self.path.glob("*.parquet"):
+      p.unlink()
+
+  def empty(self):
+    for file in self.path.glob("*.parquet"):
+      return False
+    return True
+
+  def create(self, max_size = 250_000_000):
+    self.queue = []
+    queue_size = 0
+    for document in self.corpus.documents():
+      tokens = document.tokenize()
+      # Could speed up.Tokenization
+      ids = pa.array([document.id] * len(tokens), pa.utf8())
+      batch = pa.RecordBatch.from_arrays(
+        [
+          ids,
+          tokens
+        ],
+        schema = pa.schema({
+          'id': pa.utf8(),
+          'token': pa.utf8()
+        })
+      )
+      self.queue.append((document.id, batch))
+      queue_size += batch.nbytes
+      if queue_size > max_size:
+        self.flush() # Intermedia write
+        queue_size = 0
+    self.flush() # final flush.
+
+  def flush(self):
+    if len(self.queue) == 0:
+      return
+    logging.warn(f"Flushing {len(self.queue)}")
+    # Get it alphabetically by id
+    self.queue.sort()
+    tab = pa.Table.from_batches([q[1] for q in self.queue])
+    fn = self.path / (str(uuid.uuid1()) + ".parquet")
+    parquet.write_table(tab, fn)
+    self.queue = []
+  
+  def get_tokens(self, id):
+    print(self.path)
+    ds = parquet.ParquetDataset(self.path, filters = [[
+      ['id', '=', id]
+      ]], use_legacy_dataset=False)
+    return ds.read(['token']).column("token")
+

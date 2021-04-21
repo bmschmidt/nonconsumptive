@@ -12,8 +12,14 @@ class Document(object):
 
   def __init__(self, corpus, id = None, path = None):
     self.corpus = corpus
-    self._id = None
+    self._id = id
     self._path = path    
+
+  @property
+  def path(self):
+    if self._path is not None:
+      return self._path
+    return self.corpus.path_to(self.id)
 
   @cached_property
   def id(self):
@@ -28,7 +34,7 @@ class Document(object):
 
   @cached_property
   def full_text(self, mode = "r"):
-    document = self._path
+    document = self.path
     if document.suffix == ".gz":
       fin = gzip.open(document, "rt")
     else:
@@ -42,9 +48,13 @@ class Document(object):
     except KeyError:
       return self.id
 
-  @cached_property
-  def tokens(self) -> List[str]:
-    return re.findall("[\w^_]+|[^\w\s]+", self.full_text)
+  @property
+  def tokens(self) -> pa.StringArray:
+    # Could get a lot fancier here.
+    return self.corpus.tokenization.get_tokens(self.id)
+
+  def tokenize(self) -> pa.StringArray:
+    return pa.array(re.findall("[\w^_]+|[^\w\s]+", self.full_text))
 
   def ngrams(self, n) -> List[Tuple[str]]:
       vars = [self.tokens[n-i:i-n-1] for i in range(0, n)]
@@ -60,25 +70,19 @@ class Document(object):
   def metadata(self):
     return self.corpus.metadata.get(self.id)
 
- # def tokenize(self): 
- #   """
- #   Returns the tokens of the document as an arrow list.
- #   """
- #   return pa.list_(self.tokens)
   def chunked_wordcounts(self, chunk_size) -> pa.RecordBatch:
     """
     As with the core elements 
     """
     return chunked_wordcounts(self.tokens, chunk_size)
 
-
   @cached_property
   def wordcounts(self) -> pa.RecordBatch:
-    counts = Counter(self.tokens)
-    keys = counts.keys()
-    values = counts.values()
-    return pa.record_batch([
-      pa.array(keys),
-      pa.array(values)
-    ], schema = pa.schema({"token": pa.utf8(), "count": pa.uint32()}, metadata={'nc_metadata': json.dumps(self.metadata)})
+    c = pa.RecordBatch.from_struct_array(self.tokens.value_counts())
+    return pa.record_batch(
+      [c['values'],c['counts'].cast(pa.uint32())], 
+    schema = pa.schema(
+      {"token": pa.utf8(),
+      "count": pa.uint32()},
+      metadata={'nc_metadata': json.dumps(self.metadata)})
     )

@@ -9,8 +9,15 @@ class Metadata(object):
   def __init__(self, corpus, tb: pa.Table):
     self.corpus = corpus
     self.tb = self.parse_raw_arrow(tb)
-    
-    
+
+  def __iter__(self):
+    pass
+
+  def clean(self):
+    p = self.corpus.root / "metadata_derived.parquet"
+    if p.exists():
+      p.unlink()
+
   @classmethod
   def from_cache(cls, corpus):
       tb = parquet.read_table(corpus.root / "metadata_derived.parquet")
