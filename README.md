@@ -51,9 +51,9 @@ These formats preserve types and allow binding of metadata to tables, and so pre
 
 ### Contributor rules
 
-1. No pandas imports
+1. No pandas imports outside of the 'engine'
 2. All functions should use python type annotations.
-3. Tests are goods, working examples with text are better.
+3. Unit tests are good, working examples in ipynb are good.
 
 ## Legal disclaimer
 
