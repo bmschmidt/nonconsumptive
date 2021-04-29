@@ -3,10 +3,11 @@ import yaml
 default = """
 paths:
   text_files: texts
-  metadata_file: metadata.ndjson
+  metadata_file: null
   feature_counts: feature_counts
   SRP: SRP
-
+cache:
+  - feature_counts
 """
 
 user_prefs    = {}
@@ -18,6 +19,21 @@ default_prefs = yaml.safe_load(default)
 def load_project_prefs(dir):
   global project_prefs
   pass
+
+def set_prefs(key, value):
+  global session_prefs
+  components = key.split(".")
+  p = session_prefs
+  for i, key in enumerate(components):
+    if i == len(components) - 1:
+      p[key] = value
+    else:
+      try:
+        p = p[key]
+      except KeyError:
+        p[key] = {}
+        p = p[key]
+
 
 def prefs(key):
   components = key.split(".")

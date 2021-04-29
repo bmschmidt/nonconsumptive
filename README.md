@@ -24,6 +24,18 @@ A variety of Python tools exist to read metadata ()
 The Santa Barbara statement on collections as data says "<>". 
 
 
+## Flow
+
+The basic principle is to describe the flow of data from two sources--data and metadata--into
+something that be analyzed and distributed as feature counts.
+
+```
+text -> tokenization -> feature_counts -> feature_counts -> encoded_features.--\
+                                      \                                         Interfaces
+                                       feature_counts_with_metadata            /
+metadata -> normalized_metadata ----- / --------------------------------------/
+schema ----/
+```
 
 ## Principles
 
@@ -39,10 +51,15 @@ English if they don't exist four other languages first.
 
 ## Speed.
 
-Working with large collections of can be slow. This library deploys the Apache Arrow format for binary storage to pass data
+Working with large collections of can be slow.
+This library deploys the Apache Arrow format for binary storage to pass data
 between processes to allow fast serialization, deserialization, and storage.
 
 For long-term archival deposit, it will be possible to export corpora as linked open data formatted as JSON and/or XML.
+
+### Caching
+
+In general, caching helps speed on these tasks, although you can take it too far. 
 
 ## Code strategies
 

@@ -4,11 +4,14 @@ from pyarrow import compute as pc
 from pyarrow import json as pa_json
 from pyarrow import csv as pa_csv
 from pyarrow import parquet
+import numpy as np
+from .inputs import FolderInput
 
 class Metadata(object):
-  def __init__(self, corpus, tb: pa.Table):
+  def __init__(self, corpus, tb: pa.Table, materialize:bool = True):
     self.corpus = corpus
     self.tb = self.parse_raw_arrow(tb)
+    self._do_not_materialize = not materialize
 
   def __iter__(self):
     pass
@@ -20,9 +23,22 @@ class Metadata(object):
 
   @classmethod
   def from_cache(cls, corpus):
-      tb = parquet.read_table(corpus.root / "metadata_derived.parquet")
-      return cls(corpus, tb)
-      
+    tb = parquet.read_table(corpus.root / "metadata_derived.parquet")
+    return cls(corpus, tb)
+
+  @classmethod
+  def from_filenames(cls, corpus):
+    ids = []
+
+    input = corpus.text_input_method(corpus, compression = corpus.compression, format = corpus.format)
+    for i, (doc, text) in enumerate(input):
+      ids.append(doc)
+    # Not usually done, but necessary here to 
+    # because filenames aren't cached.
+    ids.sort()
+    tb = pa.table({"id": pa.array(ids, pa.utf8())})
+    return cls(corpus, tb, materialize = False)
+
   @classmethod
   def from_ndjson(cls, corpus, file):
     """
@@ -38,6 +54,12 @@ class Metadata(object):
     """
     tb = pa_csv.read_csv(file)
     return cls(corpus, tb)
+
+  def id_to_int_lookup(self):
+    ints = np.arange(len(self.tb['id']), dtype = np.uint32)
+    dicto = dict(zip(self.tb['id'].to_pylist(), ints))
+    print(dicto, self.tb['id'].to_pylist())
+    return dicto
 
   def parse_raw_arrow(self, tb, **kwargs):
     """
@@ -72,6 +94,8 @@ class Metadata(object):
           continue
       raise FileNotFoundError("No file passed and no default file found.")
     file = corpus.root / file
+#    if file.suffix == ".parquet":
+#      return cls.from_parquet(corpus, file)
     if file.suffix == ".ndjson":
       return cls.from_ndjson(corpus, file)
     if file.suffix == ".csv":

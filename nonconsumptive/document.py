@@ -1,19 +1,15 @@
 import pyarrow as pa
-from functools import cached_property
 from collections import Counter
 from typing import List, Set, Dict, Tuple, Optional
 import re
 import json
 from pathlib import Path
 import gzip
-from .wordcounting import chunked_wordcounts
+from .wordcounting import chunked_wordcounts, wordcounts
 
-class Document(object):
-
-  def __init__(self, corpus, id = None, path = None):
-    self.corpus = corpus
-    self._id = id
-    self._path = path    
+class BaseDocument(object):
+  def __init__(self, path):
+    self._path = path
 
   @property
   def path(self):
@@ -21,18 +17,27 @@ class Document(object):
       return self._path
     return self.corpus.path_to(self.id)
 
-  @cached_property
+  @property
   def id(self):
     if self._id:
       return self._id
     id = self._path.stem
     for compression in ["gz", "lz4", "bz2"]:
-      id = id.rstrip("." + compression)
+      if id.endswith(compression):
+        id = id.rstrip("." + compression)
     for filetype in ["txt", "md", "rtf", "xml"]:
-      id = id.rstrip("." + filetype)
+      if id.endswith(filetype):
+        id = id.rstrip("." + filetype)
     return id
 
-  @cached_property
+class Document(BaseDocument):
+
+  def __init__(self, corpus, id = None, path = None):
+    self.corpus = corpus
+    self._id = id
+    self._path = path    
+
+  @property
   def full_text(self, mode = "r"):
     document = self.path
     if document.suffix == ".gz":
@@ -54,7 +59,7 @@ class Document(object):
     return self.corpus.tokenization.get_tokens(self.id)
 
   def tokenize(self) -> pa.StringArray:
-    return pa.array(re.findall("[\w^_]+|[^\w\s]+", self.full_text))
+    return tokenize(self.full_text)
 
   def ngrams(self, n) -> List[Tuple[str]]:
       vars = [self.tokens[n-i:i-n-1] for i in range(0, n)]
@@ -66,7 +71,7 @@ class Document(object):
   def __str__(self):
     return "<DOCUMENT> " +  json.dumps(self.metadata)
 
-  @cached_property
+  @property
   def metadata(self):
     return self.corpus.metadata.get(self.id)
 
@@ -76,7 +81,7 @@ class Document(object):
     """
     return chunked_wordcounts(self.tokens, chunk_size)
 
-  @cached_property
+  @property
   def wordcounts(self) -> pa.RecordBatch:
     c = pa.RecordBatch.from_struct_array(self.tokens.value_counts())
     return pa.record_batch(
@@ -85,4 +90,19 @@ class Document(object):
       {"token": pa.utf8(),
       "count": pa.uint32()},
       metadata={'nc_metadata': json.dumps(self.metadata)})
+    )
+
+def tokenize(string) -> pa.Array:
+    return pa.array(re.findall(r"[\w^_]+|[^\w\s]+", string))
+
+def token_counts(tokens: pa.Array, id: str) -> pa.RecordBatch:
+  c = pa.RecordBatch.from_struct_array(tokens.value_counts())
+  return pa.record_batch(
+    [c['values'],c['counts'].cast(pa.uint32())], 
+  schema = pa.schema(
+    {
+      "token": pa.utf8(),
+      "count": pa.uint32()
+    },
+    metadata={'id': id})
     )
