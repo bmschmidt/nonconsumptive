@@ -5,9 +5,12 @@ paths:
   text_files: texts
   metadata_file: null
   feature_counts: feature_counts
+  wordids: wordids
   SRP: SRP
 cache:
-  - feature_counts
+#  - feature_counts
+  - wordids
+  - token_counts
 """
 
 user_prefs    = {}

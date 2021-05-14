@@ -2,7 +2,7 @@ import pyarrow as pa
 from collections import Counter
 import numpy as np
 
-def chunked_wordcounts(tokens, chunk_size) -> pa.RecordBatch:
+def chunked_wordcounts(tokens, chunk_size, chunk_name = "chunk") -> pa.RecordBatch:
 
   a_chunks = []
   a_tokens = []
@@ -22,7 +22,7 @@ def chunked_wordcounts(tokens, chunk_size) -> pa.RecordBatch:
     ],
     schema = pa.schema(
       {
-        "chunk": pa.uint32(),
+        chunk_name: pa.uint32(),
         "token": pa.utf8(), 
         "count": pa.uint32()
       }

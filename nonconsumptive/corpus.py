@@ -1,21 +1,19 @@
 from pathlib import Path
 from .document import Document, tokenize, token_counts
 import pyarrow as pa
-from pyarrow import parquet
-from pyarrow import feather
+from pyarrow import parquet, feather
 from pyarrow import compute as pc
 import json
-import yaml
-import uuid
 import numpy as np
 from .prefs import prefs
 import logging
 from .metadata import Metadata
 from .data_storage import ArrowReservoir
-from .inputs import FolderInput, MalletInput
+from .inputs import FolderInput, SingleFileFormat
 from bounter import bounter
+from collections import defaultdict
 
-from typing import Callable, Iterator, Union, Optional, List
+from typing import DefaultDict, Iterator, Union, Optional, List
 
 # Custom type hints
 
@@ -25,8 +23,6 @@ class Corpus():
   def __init__(self, dir, cache_set = None, format = None, compression = None, text_input_method = "folder"):
     self.root: Path = Path(dir)
     self._metadata = None
-    self.text_location = self.root / prefs('paths.text_files')
-    assert self.text_location.exists()
     # which items to cache.
     self._cache_set = cache_set
     self.format = format
@@ -35,27 +31,34 @@ class Corpus():
 
   @property 
   def texts(self):
-    return FolderInput(self, compression = self.compression, format = self.format)
+    return self.text_input_method(self, compression = self.compression, format = self.format)
+    
   @property
   def text_input_method(self):
     if self._text_input_method == "folder":
+      self.text_location = self.root / prefs('paths.text_files')
+      assert self.text_location.exists()
       return FolderInput
-    elif self._text_input_method == "mallet":
-      return MalletInput
+    elif self._text_input_method == "input.txt":
+      assert (self.root / "input.txt").exists()
+      return SingleFileFormat
+
+  def clean(self, targets = ['metadata', 'tokenization', 'token_counts']):
+    import shutil
+    for d in targets:
+      shutil.rmtree(self.root / d)
 
   @property
   def metadata(self) -> Metadata:
-    print("here!!")
-
     if self._metadata is not None:
-      print("here!!")
       return self._metadata
     derived = Path(self.root / "metadata_derived.parquet")
     if derived.exists():
       self._metadata = Metadata.from_file(self, derived)
     try:
       mf = prefs('paths.metadata_file')
-      self._metadata: Metadata = Metadata.from_file(self, mf)
+      print("\n\n", mf, "\n\n")
+      self._metadata = Metadata.from_file(self, mf)
     except:
       self._metadata = Metadata.from_filenames(self)
 
@@ -86,24 +89,27 @@ class Corpus():
     token_counts = TokenCounts(self)
     return token_counts
 
-    
-
   def path_to(self, id):
     p1 = self.root / ("texts/" + id + ".txt.gz")
     if p1.exists():
       return p1
     logging.error(FileNotFoundError("HMM"))
     
-  @property
-  def documents(self):
-    if self.metadata and self.metadata.tb:        
-      for id in self.metadata.tb[self.metadata.id_field]:
-        yield Document(self, str(id))
+#  @property
+#  def documents(self):
+#    
+#    if self.metadata and self.metadata.tb:        
+#      for id in self.metadata.tb[self.metadata.id_field]:
+#        yield Document(self, str(id))
 
   def get_document(self, id):
     return Document(self, id)
 
+  @property
   def total_wordcounts(self, max_bytes=100_000_000) -> pa.Table:
+    cache_loc = self.root / "wordids.parquet"
+    if cache_loc.exists():
+      return parquet.read_table(cache_loc)
     counter = bounter(2048)
     for token, count in self.token_counts:
       dicto = dict(zip(token.to_pylist(), count.to_pylist()))
@@ -115,6 +121,8 @@ class Corpus():
     )
     tb = tb.take(pc.sort_indices(tb, sort_keys=[("count", "descending")]))
     tb = tb.append_column("wordid", pa.array(np.arange(len(tb)), pa.uint32()))
+    if "wordids" in prefs('cache') or 'wordids' in self.cache_set:
+      parquet.write_table(tb, cache_loc)
     return tb
 
   def feature_counts(self, dir = None):
@@ -124,7 +132,6 @@ class Corpus():
       metadata = parquet.ParquetFile(f).schema_arrow.metadata.get(b'nc_metadata')
       metadata = json.loads(metadata.decode('utf-8'))
       yield (metadata, parquet.read_table(f))
-
 
   @property
   def wordids(self):
@@ -140,15 +147,27 @@ class Corpus():
   @property
   def encoded_wordcounts(self):
     bookids = self.metadata.id_to_int_lookup()
-    wordids = self.wordids
+    w = self.total_wordcounts()
+    tokens = w['token']
+    # Missing elements batched into one final integer.
+    lookup_table = defaultdict(lambda: len(tokens))
+    for i, word in enumerate(tokens): 
+      lookup_table[word] = i
     for f in self.token_counts:
       id = f.schema.metadata.get(b"id").decode("utf-8")
-      ids = [wordids[token] for token in f['token'].to_pylist()]
-      yield pa.table({
-        'bookid': pa.array(np.full(len(ids), bookids[id], dtype = np.uint32)),
+      # ids = [wordids[token] for token in f['token'].to_pylist()]
+      ids = pc.index_in(f['token'], options=pc.SetLookupOptions(value_set=tokens)).cast(pa.uint32())
+      ids = [lookup_table[token] for token in f['token']]
+      if not id in bookids:
+        #logging.warning("Bad ID", id)
+        continue
+      tab = pa.table({
+        'bookid': pa.array(np.full(len(ids), bookids[id], dtype = np.uint32), pa.uint32()),
         'wordid': pa.array(ids, pa.uint32()),
         'count': f['count']
       })
+      for batch in tab.to_batches():
+        yield batch
 
   def write_feature_counts(self,
     single_files:bool = True,
@@ -202,9 +221,7 @@ class Corpus():
 
 
 class Tokenization(ArrowReservoir):
-
   name = "tokenization"
-
   arrow_schema = pa.schema({
     'token': pa.utf8()
   })
@@ -216,19 +233,6 @@ class Tokenization(ArrowReservoir):
         [tokens],
         schema=self.arrow_schema.with_metadata({"id": id})
       )
-"""
-  def get_tokens(self, id):
-    p = self.id_map[id]
-    return parquet.read_table(p, columns=["token"], filters = [[("id", "=", id)]]).column("token")
-  def get_word_usage(self, token):
-    ds = parquet.ParquetDataset(self.path, filters = [[
-      ['token', '=', token]
-      ]], use_legacy_dataset=False)
-    return ds.read(['id']).column("id")
-
-  def ingest_function(self, id, val = None):
-    pass
-"""
 
 class TokenCounts(ArrowReservoir):
   name = "token_counts"
@@ -245,3 +249,5 @@ class TokenCounts(ArrowReservoir):
       id = batch.schema.metadata.get(b"id").decode("utf-8")
       yield token_counts(batch['token'], id)
 
+class ChunkedTokenCounts(TokenCounts):
+  name = "token_counts"

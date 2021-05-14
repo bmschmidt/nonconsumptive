@@ -20,6 +20,8 @@ class TestCaching():
     def setup_class(cls):
         for p in Path("tests/corpora/minicomp_ed").glob("**/*.ipc"):
             p.unlink()
+        for p in Path("tests/corpora/minicomp_ed").glob("**/*.json"):
+            p.unlink()
     
     def test_creates_intermediate(self):
         corpus = Corpus(Path('tests', 'corpora', 'minicomp_ed'), cache_set = {"tokenization"}, format = "md", compression = None)

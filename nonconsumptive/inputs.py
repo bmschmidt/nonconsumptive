@@ -1,6 +1,7 @@
 from pathlib import Path
 from .document import Document
 from typing import Callable, Iterator, Union, Optional, List, Tuple
+import logging
 
 class SingleFileFormat():
   __doc__ = """
@@ -18,19 +19,28 @@ class SingleFileFormat():
     self.format = format
     self.corpus = corpus
     self.compression = compression
-    self.dir = corpus.root / dir
+    self.dir = dir
 
-  def documents(self) -> Iterator[Document]:
-    # This is inefficient!
-    for line in open(self):
-      id, _ = doc.split("\t", 1)
-      yield Document(self.corpus, id = id)
+#  def documents(self) -> Iterator[Document]:
+#    # This is inefficient!
+#    for line in open(self):
+#      try:
+#        id, _ = line.split("\t", 1)
+#        yield Document(self.corpus, id = id)
+#      except IndexError:
 
   def __iter__(self) -> Iterator[Tuple[str, str]]:
+    errored = []
+
     for line in open(self.corpus.root / self.dir):
-      id, text = doc.split("\t", 1)
-      yield id, text
-      
+      try:
+        id, text = line.split("\t", 1)
+        yield id, text
+      except ValueError:
+        errored.append(line)
+    if len(errored):
+      logging.warning(f"{len(errored)} unprintable lines, including:\n")
+      logging.warning(*errored[:5])
 
 class FolderInput():
   __doc__ = """
