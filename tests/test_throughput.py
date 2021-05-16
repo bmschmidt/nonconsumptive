@@ -6,7 +6,7 @@ import pyarrow as pa
 
 @pytest.fixture(scope="module")
 def simple_corpus():
-    return Corpus(Path('tests', 'corpora', 'test1'), format = "txt")
+    return Corpus(source_dir = Path('tests', 'corpora', 'test1'), target_dir = "tmp", format = "txt")
 
 class TestVolume():
     def test_text_iteration(self, simple_corpus):
@@ -44,7 +44,7 @@ class TestVolume():
         assert counts == 42
 
     def test_total_wordcounts(self, simple_corpus):
-        counts = simple_corpus.total_wordcounts()
+        counts = simple_corpus.total_wordcounts
         # most common word should be 'a'
         assert counts.to_pandas()['token'][0] == 'a'
         df = counts.to_pandas()
@@ -52,18 +52,20 @@ class TestVolume():
 
     def test_bookids(self, simple_corpus):
         meta = simple_corpus.metadata
-        lookup = meta.id_to_int_lookup()
+        lookup = meta.id_to_int_lookup
         for letter in "abг":
             assert letter in lookup
 
     def test_basic_wordids(self, simple_corpus):
         wordids = simple_corpus.wordids
-        for word in ["wife", "fortune"]:
+        for word in ["wife", "fortune", "каждая"]:
             assert word in wordids
 
     def test_encode_wordcounts(self, simple_corpus):
         total = 0
+
         for batch in simple_corpus.encoded_wordcounts:
+            print("GAHH", batch.to_pandas())
             total += batch.to_pandas()['count'].sum()
             assert batch.to_pandas().shape[1] == 3
         assert total == 42

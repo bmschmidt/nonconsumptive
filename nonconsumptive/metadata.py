@@ -63,12 +63,12 @@ class Metadata(object):
 
   @property
   def text_ids(self) -> pa.Table:
-    self.id_field = "filename"
     path = Path(self.corpus.root / "metadata")
     path.mkdir(exist_ok=True)
     dest = path / "textids.feather"
     if dest.exists():
       return feather.read_table(dest)
+    print(self.tb.schema)
     ints = np.arange(len(self.tb[self.id_field]), dtype = np.uint32)
     tb = pa.table([
       pa.array(ints),
@@ -80,20 +80,20 @@ class Metadata(object):
     pa.feather.write_feather(tb, dest)
     return tb
 
+  @property
   def id_to_int_lookup(self):
     ids = self.text_ids
-    dicto = dict(zip(ids['filename'].to_pylist(), ids['bookid'].to_pylist()))
+    dicto = dict(zip(ids[self.id_field].to_pylist(), ids['bookid'].to_pylist()))
     return dicto
 
-  def parse_raw_arrow(self, tb, **kwargs):
+  def parse_raw_arrow(self, tb):
     """
     Do some typechecking on the raw arrow. Ensure that the id field is 
     cast to a string, maybe do some date parsing, that sort of thing.
 
     kwargs: table metadata arguments.
     """
-    id_field = guess_id_field(tb, **kwargs)
-    self.id_field = id_field
+    self.id_field = id_field(tb)
     columns = {}
     for field in tb.schema:
       if field.name == id_field and field.type != pa.utf8():
@@ -104,7 +104,7 @@ class Metadata(object):
     tb = pa.table(
       columns
     )
-    tb = tb.replace_schema_metadata(kwargs)
+    tb = tb.replace_schema_metadata()
     return tb
 
 
@@ -113,11 +113,10 @@ class Metadata(object):
     if file is None:
       for name in ["metadata.ndjson", "metadata.csv", "metadata.feather", "metadata.parquet", "jsoncatalog.txt"]:
         try:
-          return cls.from_file(corpus, file=name)
+          return cls.from_file(corpus, file= corpus.source_dir / name)
         except FileNotFoundError:
           continue
       raise FileNotFoundError("No file passed and no default file found.")
-    file = corpus.root / file
     if file.suffix == ".ndjson":
       return cls.from_ndjson(corpus, file)
     if file.name == "jsoncatalog.txt":
@@ -137,19 +136,17 @@ class Metadata(object):
       raise IndexError(f"Couldn't find solitary match for {id}")
     return {k:v[0] for k, v in matching.to_pydict().items()}
 
-def guess_id_field(tb: pa.Table, **kwargs) -> str:
+def id_field(tb: pa.Table) -> str:
   """
-  tb: 
+  tb: a pyarrow table to find the id field from
   """
-  if "id_field" in kwargs:
-    return kwargs['id_field']
-  default_names = {"filename", "id"}
+  default_names = {"@id", "filename", "id"}
   if tb.schema[0].name in default_names:
     return tb.schema[0].name
   for field in tb.schema:
     if field.name in default_names:
        return field.name
-  raise NameError("No columns named 'id' or 'filename' in data; please manually set an id for each document.")
+  raise NameError("No columns named '@id', 'id' or 'filename' in data; please manually set an id for each document.")
 
 def ingest_json(file:Path):
 
@@ -161,7 +158,7 @@ def ingest_json(file:Path):
     try:
         return pa.json.read_json(file)
     except pa.ArrowInvalid as err:
-        match = re.search('Column\(/(.*)\) changed from (string|arry) to (array|string)', str(err))
+        match = re.search(r'Column\(/(.*)\) changed from (string|arry) to (array|string)', str(err))
         if match:
             # Wrap the column as a list
             bad_col = match.groups()[0]

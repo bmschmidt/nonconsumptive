@@ -5,23 +5,26 @@ from pyarrow import parquet, feather
 from pyarrow import compute as pc
 import json
 import numpy as np
-from .prefs import prefs
 import logging
+from bounter import bounter
+from collections import defaultdict
+import duckdb
+from typing import DefaultDict, Iterator, Union, Optional, List
+import polars as pl
+
+from .prefs import prefs
 from .metadata import Metadata
 from .data_storage import ArrowReservoir
 from .inputs import FolderInput, SingleFileFormat
-from bounter import bounter
-from collections import defaultdict
-
-from typing import DefaultDict, Iterator, Union, Optional, List
 
 # Custom type hints
 
 _Path = Union[str, Path]
 
 class Corpus():
-  def __init__(self, dir, cache_set = None, format = None, compression = None, text_input_method = "folder"):
-    self.root: Path = Path(dir)
+  def __init__(self, source_dir, target_dir, cache_set = None, format = None, compression = None, text_input_method = "folder"):
+    self.source_dir = Path(source_dir)
+    self.root: Path = Path(target_dir)
     self._metadata = None
     # which items to cache.
     self._cache_set = cache_set
@@ -36,11 +39,11 @@ class Corpus():
   @property
   def text_input_method(self):
     if self._text_input_method == "folder":
-      self.text_location = self.root / prefs('paths.text_files')
+      self.text_location = self.source_dir / prefs('paths.text_files')
       assert self.text_location.exists()
       return FolderInput
     elif self._text_input_method == "input.txt":
-      assert (self.root / "input.txt").exists()
+      assert (self.source_dir / "input.txt").exists()
       return SingleFileFormat
 
   def clean(self, targets = ['metadata', 'tokenization', 'token_counts']):
@@ -90,7 +93,7 @@ class Corpus():
     return token_counts
 
   def path_to(self, id):
-    p1 = self.root / ("texts/" + id + ".txt.gz")
+    p1 = self.source_dir / ("texts/" + id + ".txt.gz")
     if p1.exists():
       return p1
     logging.error(FileNotFoundError("HMM"))
@@ -138,37 +141,59 @@ class Corpus():
     """
     Returns wordids in a dict format. 
     """
-    w = self.total_wordcounts()
+    w = self.total_wordcounts
     tokens = w['token']
     counts = w['count']
     return dict(zip(tokens.to_pylist(), counts.to_pylist()))
 
-
   @property
   def encoded_wordcounts(self):
-    bookids = self.metadata.id_to_int_lookup()
-    w = self.total_wordcounts()
-    tokens = w['token']
-    # Missing elements batched into one final integer.
-    lookup_table = defaultdict(lambda: len(tokens))
-    for i, word in enumerate(tokens): 
-      lookup_table[word] = i
-    for f in self.token_counts:
-      id = f.schema.metadata.get(b"id").decode("utf-8")
-      # ids = [wordids[token] for token in f['token'].to_pylist()]
-      ids = pc.index_in(f['token'], options=pc.SetLookupOptions(value_set=tokens)).cast(pa.uint32())
-      ids = [lookup_table[token] for token in f['token']]
-      if not id in bookids:
-        #logging.warning("Bad ID", id)
-        continue
-      tab = pa.table({
-        'bookid': pa.array(np.full(len(ids), bookids[id], dtype = np.uint32), pa.uint32()),
-        'wordid': pa.array(ids, pa.uint32()),
-        'count': f['count']
-      })
-      for batch in tab.to_batches():
-        yield batch
+    i = 0
+    bookid_lookup = self.metadata.id_to_int_lookup
+    wordids = pl.from_arrow(self.total_wordcounts.select(["token", "wordid"]))
+    batches = []
+    cache_size = 0
 
+    for batch in self.token_counts:
+        try:
+            id = batch.schema.metadata.get(b"id").decode("utf-8")
+            bookid = bookid_lookup[id]
+        except KeyError:
+            raise
+        tab = pa.table({
+            'bookid': pa.array(np.full(len(batch), bookid, dtype = np.uint32), pa.uint32()),
+            'token': batch['token'],
+            'count': batch['count']
+        })
+        batches.append(tab)
+        cache_size += tab.nbytes
+        if cache_size > 5_000_000:
+          remainder = pl.from_arrow(pa.concat_tables(batches))
+          q = wordids.join(remainder, left_on=["token"], right_on=["token"], how="inner", )
+          for b in q.to_arrow().select(["bookid", "wordid", "count"]).to_batches():
+              yield b          
+          cache_size = 0
+          batches = []
+    remainder = pl.from_arrow(pa.concat_tables(batches))
+    q = wordids.join(remainder, left_on=["token"], right_on=["token"], how="inner", )
+    for b in q.to_arrow().select(["bookid", "wordid", "count"]).to_batches():
+        yield b
+  @property
+  def bookid_wordcounts(self):
+    bookid_lookup = self.metadata.id_to_int_lookup
+    ids, counts = [], []
+    cache_size = 0
+    for batch in self.token_counts:
+        try:
+            id = batch.schema.metadata.get(b"id").decode("utf-8")
+            bookid = bookid_lookup[id]
+        except KeyError:
+            raise
+        count = pc.sum(batch['count']).as_py()
+        ids.append(bookid)
+        counts.append(count)
+    return pa.table([pa.array(ids, pa.uint32()), pa.array(counts, pa.uint32())],
+        names = ['bookid', 'nwords'])
   def write_feature_counts(self,
     single_files:bool = True,
     chunk_size:Optional[int] = None,

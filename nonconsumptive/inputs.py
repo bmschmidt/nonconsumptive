@@ -32,7 +32,7 @@ class SingleFileFormat():
   def __iter__(self) -> Iterator[Tuple[str, str]]:
     errored = []
 
-    for line in open(self.corpus.root / self.dir):
+    for line in open(self.corpus.source_dir / self.dir):
       try:
         id, text = line.split("\t", 1)
         yield id, text
@@ -58,7 +58,7 @@ class FolderInput():
     self.format = format
     self.corpus = corpus
     self.compression = compression
-    self.dir = corpus.root / dir
+    self.dir = corpus.source_dir / dir
 
   def documents(self) -> Iterator[Document]:
     if self.compression is None:
