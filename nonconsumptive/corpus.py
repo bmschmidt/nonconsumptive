@@ -8,7 +8,6 @@ import numpy as np
 import logging
 from bounter import bounter
 from collections import defaultdict
-import duckdb
 from typing import DefaultDict, Iterator, Union, Optional, List
 import polars as pl
 

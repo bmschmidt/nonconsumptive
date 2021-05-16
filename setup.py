@@ -10,5 +10,6 @@ setup(name='nonconsumptive',
       packages=['nonconsumptive'],
       install_requires=[
           'pyarrow',
+          'polars'
       ],
       zip_safe=False)
