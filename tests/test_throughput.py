@@ -6,7 +6,7 @@ import pyarrow as pa
 
 @pytest.fixture(scope="module")
 def simple_corpus():
-    return Corpus(source_dir = Path('tests', 'corpora', 'test1'), target_dir = "tmp", format = "txt")
+    return Corpus(texts = Path('tests', 'corpora', 'test1', 'texts'), dir = "tmp", format = "txt", cache_set = {})
 
 class TestVolume():
     def test_text_iteration(self, simple_corpus):

@@ -20,10 +20,37 @@ from .inputs import FolderInput, SingleFileFormat
 
 _Path = Union[str, Path]
 
+
 class Corpus():
-  def __init__(self, source_dir, target_dir, cache_set = None, format = None, compression = None, text_input_method = "folder"):
-    self.source_dir = Path(source_dir)
-    self.root: Path = Path(target_dir)
+  def __init__(self, dir, texts = None, 
+                     metadata = None, cache_set = None, 
+                     format = None, compression = None, 
+                     text_input_method = None):
+    """Create a corpus
+
+    Arguments:
+    dir -- the location to save derived files.
+    texts -- the location of texts to ingest (a file or a folder.) If None, no text can be read
+             but metadata functions may still work.
+    metadata -- the location of a metadata file with a suffix indicating 
+                the file type (.parquet, .ndjson, .csv, etc.) If not passed, bare-bones metadata will 
+                be created based on filenames.
+    cache_set -- Which elements created by the nc_pipeline should be persisted to disk. If None,
+                 defaults will be taken from .prefs().
+    format    -- The text format used ('.txt', '.html', '.tei', '.md', etc.)
+    compression -- Compression used on texts. Only '.gz' currently supported.
+    text_input_method -- deprecated?
+
+    """
+    if texts is not None: 
+      self.full_text_path = Path(texts)
+    else:
+      self.full_text_path = None
+    if metadata is not None:
+      self.metadata_path = Path(metadata)
+    else:
+      self.metadata_path = None
+    self.root: Path = Path(dir)
     self._metadata = None
     # which items to cache.
     self._cache_set = cache_set
@@ -31,18 +58,32 @@ class Corpus():
     self.compression = compression
     self._text_input_method = text_input_method
 
+  def setup_input_method(self, full_text_path, method):
+    if method is not None:
+      return method
+    if full_text_path.is_dir():
+      return 
+
   @property 
   def texts(self):
     return self.text_input_method(self, compression = self.compression, format = self.format)
     
   @property
   def text_input_method(self):
+    # Defaults based on passed input. This may become the only method--
+    # it's not clear to me why one should have to pass both.
+    if self._text_input_method is None:
+      if self.full_text_path is None:
+        raise NotImplementedError("Streams not suppported. Must pass a file.")
+      if self.full_text_path.is_dir():
+        self._text_input_method = "folder"
+      if self.full_text_path.is_file():
+        self._text_input_method = "input.txt"
     if self._text_input_method == "folder":
-      self.text_location = self.source_dir / prefs('paths.text_files')
+      self.text_location = self.full_text_path
       assert self.text_location.exists()
       return FolderInput
     elif self._text_input_method == "input.txt":
-      assert (self.source_dir / "input.txt").exists()
       return SingleFileFormat
 
   def clean(self, targets = ['metadata', 'tokenization', 'token_counts']):
@@ -92,7 +133,8 @@ class Corpus():
     return token_counts
 
   def path_to(self, id):
-    p1 = self.source_dir / ("texts/" + id + ".txt.gz")
+    
+    p1 = self.full_text_path / (id + ".txt.gz")
     if p1.exists():
       return p1
     logging.error(FileNotFoundError("HMM"))

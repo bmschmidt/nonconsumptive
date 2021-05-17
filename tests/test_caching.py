@@ -13,7 +13,7 @@ class TestCaching():
             p.unlink()
     
     def test_creates_intermediate(self, tmpdir):
-        corpus = Corpus(Path('tests', 'corpora', 'minicomp_ed'), target_dir = tmpdir,
+        corpus = Corpus(texts = Path('tests', 'corpora', 'minicomp_ed'), dir = tmpdir,
             cache_set = {"tokenization"}, format = "md", compression = None)
         counts = []
         for count in corpus.token_counts:
@@ -29,10 +29,10 @@ class TestCaching():
         ipcs = [*Path(tmpdir).glob("**/*.ipc")]
         assert(len(ipcs) == 1)
 
-        corpus = Corpus(Path('tests', 'corpora', 'minicomp_ed'), target_dir = tmpdir,
+        corpus = Corpus(texts = Path('tests', 'corpora', 'minicomp_ed'), dir = tmpdir,
             cache_set = {"tokenization"}, format = "md", compression = None)
 
-        corpus = Corpus(Path('tests', 'corpora', 'minicomp_ed'), target_dir = tmpdir,
+        corpus = Corpus(texts = Path('tests', 'corpora', 'minicomp_ed'), dir = tmpdir,
             cache_set = {"token_counts", "tokenization"}, format = "md", compression = None)
 
         counts = []

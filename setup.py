@@ -12,4 +12,5 @@ setup(name='nonconsumptive',
           'pyarrow',
           'polars'
       ],
-      zip_safe=False)
+      zip_safe=False
+)

@@ -35,7 +35,7 @@ class Metadata(object):
   @classmethod
   def from_filenames(cls, corpus) -> cls:
     ids = []
-    input = corpus.text_input_method(corpus, compression = corpus.compression, format = corpus.format)
+    input = corpus.text_input_method(corpus)
     for i, (doc, text) in enumerate(input):
       ids.append(doc)
     # Not usually done, but necessary here to 
@@ -113,7 +113,7 @@ class Metadata(object):
     if file is None:
       for name in ["metadata.ndjson", "metadata.csv", "metadata.feather", "metadata.parquet", "jsoncatalog.txt"]:
         try:
-          return cls.from_file(corpus, file= corpus.source_dir / name)
+          return cls.from_file(corpus, file = corpus.metadata_path)
         except FileNotFoundError:
           continue
       raise FileNotFoundError("No file passed and no default file found.")
@@ -211,8 +211,8 @@ class Catalog():
           tables['catalog'][name] = col
           tables['fastcat'][name] = col
         elif pa.types.is_dictionary(col.type):
+          tables[name + "Lookup"][f'{name}__id'] = pa.array(np.arange(len(col.chunks[-1].dictionary)), col.type.index_type)
           tables[name + "Lookup"][f'{name}'] = col.chunks[-1].dictionary
-          tables[name + "Lookup"][f'{name}__id'] = pa.array(np.arange(len(col.chunks[-1].dictionary)))
           tables['fastcat'][f'{name}__id'] = pa.chunked_array([chunk.indices for chunk in rich[name].chunks])          
           tables['catalog'][name] = col # <- Only works b/c parquet has no dict type.
         elif pa.types.is_list(col.type):
