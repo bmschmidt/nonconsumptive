@@ -55,6 +55,8 @@ class Corpus():
     # which items to cache.
     self._cache_set = cache_set
     self.format = format
+    if self.format is None:
+      self.format = "txt"
     self.compression = compression
     self._text_input_method = text_input_method
 
@@ -104,7 +106,6 @@ class Corpus():
       self._metadata = Metadata.from_file(self, mf)
     except:
       self._metadata = Metadata.from_filenames(self)
-
     return self._metadata
 
   @property
@@ -133,18 +134,17 @@ class Corpus():
     return token_counts
 
   def path_to(self, id):
-    
     p1 = self.full_text_path / (id + ".txt.gz")
     if p1.exists():
       return p1
     logging.error(FileNotFoundError("HMM"))
     
-#  @property
-#  def documents(self):
-#    
-#    if self.metadata and self.metadata.tb:        
-#      for id in self.metadata.tb[self.metadata.id_field]:
-#        yield Document(self, str(id))
+  @property
+  def documents(self):
+    
+    if self.metadata and self.metadata.tb:        
+      for id in self.metadata.tb[self.metadata.id_field]:
+        yield Document(self, str(id))
 
   def get_document(self, id):
     return Document(self, id)

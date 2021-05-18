@@ -128,7 +128,7 @@ class Metadata(object):
 
   def get(self, id) -> dict:
     
-    matching = pc.filter(self.tb, pc.equal(self.tb[self.id_field], id))
+    matching = pc.filter(self.tb, pc.equal(self.tb[self.id_field], pa.scalar(id)))
     try:
       assert(matching.shape[0] == 1)
     except:

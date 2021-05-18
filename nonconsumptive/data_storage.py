@@ -1,8 +1,9 @@
 from pathlib import Path
 from .document import Document
-from pyarrow import parquet
-from pyarrow import feather
+from pyarrow import parquet, feather, ipc
+from pyarrow import compute as pc
 import pyarrow as pa
+
 import json
 import yaml
 import uuid
@@ -10,7 +11,7 @@ import numpy as np
 from .prefs import prefs
 import logging
 from .metadata import Metadata
-import gzip
+from .arrow_helpers import batch_id
 
 from typing import Callable, Iterator, Union, Optional, List
 
@@ -48,9 +49,14 @@ class Reservoir(object):
       p.unlink()
 
   def empty(self):
-    for file in self.path.glob(f"**/*.{self.format}"):
+    # Check if any items have been created.
+    for _ in self.path.glob(f"**/*.{self.format}"):
       return False
     return True
+
+  def full(self):
+    # Check if every item in the metadata has been created.
+    pass
 
   def build_cache(self):
       raise NotImplementedError("Class does not allow caching.")
@@ -125,7 +131,6 @@ class OldParquetMethods():
     self.flush() # final flush.
     self._id_map = None
 
-
   def flush_batch(self):
     if len(self.queue) == 0:
       return
@@ -161,7 +166,6 @@ class OldParquetMethods():
 class Livestream(Reservoir):
   format = None
 
-
 class ArrowReservoir(Reservoir):
   format = "ipc"
 
@@ -182,34 +186,70 @@ class ArrowReservoir(Reservoir):
   def flush(self):
       pass
 
-  def build_cache(self, max_size = 5e08, max_files = 1e06, iterator = True):
+  def build_cache(self, max_size = 5e08, max_files = 1e06):
     """
-    max_size: 
-    max size of reservoir files
 
-    max_files:
-    max files in a single reservoir file.
+    max_size:  Max size of reservoir files, in bytes.
+    max_files: Max documents in a single reservoir file.
     """
-    sink = self.open_writer()    
+
+    print("Building cache")
+    sink = self.open_writer()
     for batch in self._from_upstream():
-        if iterator:
-            yield batch
         assert(batch.schema.metadata)
-        self.ids.append(batch.schema.metadata.get(b'id').decode('utf-8'))
+        yield batch
+        self.ids.append(batch_id(batch))
         sink.write_batch(batch)
         self.batches += 1
         self.bytes += batch.nbytes
         if self.bytes > max_size or self.batches > max_files:
           sink.close()
-          self.flush_ids()          
-          sink = self.open_writer() 
+          self.flush_ids()
+          sink = self.open_writer()
+    sink.close()
     self.flush_ids()
-    sink.close()               
 
   def flush_ids(self):
       path = self.path / (self.current_file_uuid + ".json")
       json.dump(self.ids, path.open("w"))
       self.ids = []
+
+  @property
+  def id_location_map(self):
+    if self.empty():
+      return None
+    dest = Path(self.path / "id_location_lookup.parquet")
+    if dest.exists():
+      dest.unlink()
+    files = []
+    ids = []
+    batch_numbers = []
+    for file in self.path.glob("*.json"):
+      ids_here = json.load(file.open())
+      ids.extend(ids_here)
+      batch_numbers.extend(range(len(ids_here)))
+      fname = file.with_suffix("").name
+      files.extend([fname] * len(ids_here))
+    tab = pa.table(
+      {
+        'file': files,
+        'id': ids,
+        'batch': batch_numbers
+      })
+    tab = tab.take(pc.sort_indices(tab['id']))
+    parquet.write_table(tab, dest)
+    return dest
+
+  def get_id(self, id):
+    if self.empty():
+      for r in self.build_cache():
+        pass
+    rows = parquet.read_table(self.id_location_map, filters = [(('id', '==', id))])
+    dicto = rows.to_pydict()
+    file = dicto['file'][0] + ".ipc"
+    batch = dicto['batch'][0]
+    with ipc.open_file(self.path / file) as f:
+      return f.get_batch(batch)
 
   def iter_cache(self) -> Iterator[pa.RecordBatch]:
     for file in self.path.glob("*.ipc"):

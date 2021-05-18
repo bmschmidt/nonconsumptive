@@ -48,7 +48,6 @@ class FolderInput():
   Can be nested at any depth.
 
   Ids are taken from filenames with ".txt.gz" removed.
-
   """
   def __init__(self,
     corpus,
@@ -59,12 +58,11 @@ class FolderInput():
     self.compression = compression
     self.dir = corpus.full_text_path
 
-
   def documents(self) -> Iterator[Document]:
     if self.compression is None:
       glob = f"**/*.{self.format}"
     else:
-      glob = f"**/*.{format}.{compression}"
+      glob = f"**/*.{self.format}.{self.compression}"
     assert(self.dir.exists())
     for f in self.dir.glob(glob):
       yield Document(self.corpus, path = f)

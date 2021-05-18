@@ -8,6 +8,9 @@ import gzip
 from .wordcounting import chunked_wordcounts, wordcounts
 
 class BaseDocument(object):
+  """
+  Not sure what this is for yet.
+  """
   def __init__(self, path):
     self._path = path
 
@@ -30,6 +33,7 @@ class BaseDocument(object):
         id = id.rstrip("." + filetype)
     return id
 
+
 class Document(BaseDocument):
 
   def __init__(self, corpus, id = None, path = None):
@@ -47,16 +51,9 @@ class Document(BaseDocument):
     return fin.read()
 
   @property
-  def filename(self):
-    try:
-      return self.metadata['filename']
-    except KeyError:
-      return self.id
-
-  @property
   def tokens(self) -> pa.StringArray:
     # Could get a lot fancier here.
-    return self.corpus.tokenization.get_tokens(self.id)
+    return self.corpus.tokenization.get_id(self.id)
 
   def tokenize(self) -> pa.StringArray:
     return tokenize(self.full_text)
@@ -83,7 +80,7 @@ class Document(BaseDocument):
 
   @property
   def wordcounts(self) -> pa.RecordBatch:
-    c = pa.RecordBatch.from_struct_array(self.tokens.value_counts())
+    c = pa.RecordBatch.from_struct_array(self.tokens['token'].value_counts())
     return pa.record_batch(
       [c['values'],c['counts'].cast(pa.uint32())], 
     schema = pa.schema(
