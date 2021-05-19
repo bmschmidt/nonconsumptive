@@ -15,7 +15,7 @@ from .prefs import prefs
 from .metadata import Metadata
 from .data_storage import ArrowReservoir
 from .inputs import FolderInput, SingleFileFormat
-
+from .arrow_helpers import batch_id
 # Custom type hints
 
 _Path = Union[str, Path]
@@ -114,6 +114,42 @@ class Corpus():
       return self._cache_set
     else:
       return {}
+
+  @property 
+  def bigrams(self):
+    """
+    returns a reservoir that iterates over tokenized 
+    arrow batches of documents as arrow arrays. 
+    """
+    tokenizer = Bigrams(self)
+    return tokenizer
+
+  @property 
+  def trigrams(self):
+    """
+    returns a reservoir that iterates over tokenized 
+    arrow batches of documents as arrow arrays. 
+    """
+    tokenizer = Trigrams(self)
+    return tokenizer
+
+  @property 
+  def quadgrams(self):
+    """
+    returns a reservoir that iterates over tokenized 
+    arrow batches of documents as arrow arrays. 
+    """
+    tokenizer = Quadgrams(self)
+    return tokenizer
+  @property 
+
+  def quintgrams(self):
+    """
+    returns a reservoir that iterates over tokenized 
+    arrow batches of documents as arrow arrays. 
+    """
+    tokenizer = Quadgrams(self)
+    return tokenizer
 
   @property 
   def tokenization(self):
@@ -238,7 +274,7 @@ class Corpus():
   def write_feature_counts(self,
     single_files:bool = True,
     chunk_size:Optional[int] = None,
-    batch_size:int = 250_000_000):
+    batch_size:int = 250_000_000) -> None:
     
     """
     Write feature counts with metadata for all files in the document.
@@ -307,13 +343,133 @@ class TokenCounts(ArrowReservoir):
     'count': pa.uint32()
   }
 
-  def _from_local(self):
-    pass
-
   def _from_upstream(self) -> Iterator[pa.RecordBatch]:
     for batch in self.corpus.tokenization:
       id = batch.schema.metadata.get(b"id").decode("utf-8")
       yield token_counts(batch['token'], id)
 
+class Ngrams(ArrowReservoir):
+  def __init__(self, ngrams: int, corpus: Corpus, end_chars: List[str] = [], beginning_chars: List[str] = [], **kwargs):
+    """
+
+    Creates an (optionally cached) iterator over record batches of ngram counts.
+    Each batch is a single document, with columns ['token1', 'token2', ... , 'token{n}', count]
+
+    ngrams: an integer. Size of the ngrams to construct.
+    end_chars: a list of regular expression (re2 compatible) to treat as the *end* of an n-gram.
+               For instance, [r"[\.\?\!]"] would attach sentence-ending punctuators to the end of
+               n-grams but not the beginning, and not allow ngrams from separate sentence.
+    beginning_chars: a list of regular expression (re2 compatible) to treat as the *beginning* of an n-gram.
+               For instance, ["“", "<"] would attach opening curly quotes and angle brackets to n-grams with the letters that
+               follow. (This is provided experimentally, may be removed because it doesn't seem very useful.
+               But perhaps there are languages where it helps.)
+
+    *args, **kwargs: passed to ArrowReservoir.
+
+    """
+    self.ngrams = ngrams
+    self.name = f"{ngrams}gram_counts"
+    self.end_chars = end_chars
+    self.beginning_chars = beginning_chars
+    super().__init__(corpus, **kwargs)
+#    for n in range(ngrams):
+#      self.arrow_schema[f"token{n}"] = pa.utf8()
+#    self.arrow_schema['count'] = pa.uint32()
+
+  def _from_local(self):
+    pass
+
+  def _from_upstream(self) -> Iterator[pa.RecordBatch]:
+    ngrams = self.ngrams
+    for batch in self.corpus.tokenization:
+      id = batch_id(batch)
+      zengrams = ngrams - 1 # Zero-indexed ngrams--slightly more convenient here.
+      tokens = batch['token']
+      cols = {}
+      for n in range(ngrams):
+          if n == 0:
+              cols["token1"] = tokens[:-zengrams]
+          elif n == ngrams - 1:
+              cols[f"token{n+1}"] = tokens[n:]
+          else:
+              cols[f"token{n+1}"] = tokens[n:-(zengrams-n)]
+      ngram_tab = pa.table(cols)
+
+      # Temporarily pass through pandas because https://github.com/pola-rs/polars/issues/668
+      t = pl.from_pandas(ngram_tab.to_pandas())
+      counts = t.groupby([f"token{i+1}" for i in range(ngrams)])\
+          .agg([pl.count("token1").alias("count")])
+
+      cols = []
+      for i in range(ngrams):
+          cols.append(counts[f'token{i+1}'].to_arrow().cast(pa.string()))
+      cols.append(counts['count'].to_arrow())
+      yield pa.RecordBatch.from_arrays(cols, schema=self.arrow_schema.with_metadata({'id': batch_id(batch)}))
+
+class Bigrams(Ngrams):
+  """
+  Convenience around Ngrams for the case of n==2.
+  """
+  name = "bigrams"
+  arrow_schema = pa.schema(
+    {
+      'token1': pa.string(),
+      'token2': pa.string(),
+      'count': pa.uint32()
+    }
+  )
+  def __init__(self, corpus, **kwargs):
+    super().__init__(ngrams=2, corpus=corpus, **kwargs)
+
+class Trigrams(Ngrams):
+  """
+  Convenience around Ngrams for the case of n==2.
+  """
+  arrow_schema = pa.schema(
+    {
+      'token1': pa.string(),
+      'token2': pa.string(),
+      'token3': pa.string(),
+      'count': pa.uint32()
+    }
+  )
+  def __init__(self, corpus, **kwargs):
+    super().__init__(ngrams=3, corpus=corpus, **kwargs)
+
+class Quadgrams(Ngrams):
+  """
+  Convenience around Ngrams for the case of n==2.
+  """
+  arrow_schema = pa.schema(
+    {
+      'token1': pa.string(),
+      'token2': pa.string(),
+      'token3': pa.string(),
+      'token4': pa.string(),
+      'count': pa.uint32()
+    }
+  )
+  def __init__(self, corpus, **kwargs):
+    super().__init__(ngrams=3, corpus=corpus, **kwargs)
+
+class Quintgrams(Ngrams):
+  """
+  Convenience around Ngrams for the case of n==2.
+  """
+  arrow_schema = pa.schema(
+    {
+      'token1': pa.string(),
+      'token2': pa.string(),
+      'token3': pa.string(),
+      'token4': pa.string(),
+      'token5': pa.string(),
+      'count': pa.uint32()
+    }
+  )
+
+  def __init__(self, corpus, **kwargs):
+    super().__init__(ngrams=3, corpus=corpus, **kwargs)
+
+
 class ChunkedTokenCounts(TokenCounts):
-  name = "token_counts"
+  name = "chunked_counts"
