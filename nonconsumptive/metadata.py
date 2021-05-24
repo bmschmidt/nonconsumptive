@@ -9,73 +9,66 @@ from pathlib import Path
 import numpy as np
 from .inputs import FolderInput
 import tempfile
+import logging
+import gzip
 from pyarrow import types
 from collections import defaultdict
-
+import polars as pl
+from typing import DefaultDict, Iterator, Union, Optional, List
+import nonconsumptive as nc
 tmpdir = tempfile.TemporaryDirectory
 
+nc_schema_version = 0.1
+
+def cat_from_filenames(corpus) -> Metadata:
+  ids = []
+  for (doc, text) in corpus.texts:
+    ids.append(doc)
+  # Not usually done, but necessary here to 
+  # ensure reproducibility across runs
+  # because filenames aren't cached.
+  ids.sort()
+  tb = pa.table({"@id": pa.array(ids, pa.utf8())})
+  return tb
+
 class Metadata(object):
-  def __init__(self, corpus, tb: pa.Table, materialize:bool = True):
+  def __init__(self, corpus: nc.Corpus, raw_file: Optional[Union[str, Path]]):
     self.corpus = corpus
-    self.tb = self.parse_raw_arrow(tb)
-    self._do_not_materialize = not materialize
+    if raw_file is None and not Path(self.nc_metadata_path).exists():
+      # When no metadata is passed, create minimal metadata from the 
+      # filenames on disk.
+      basic_ids = cat_from_filenames(corpus)
+      self.catalog = Catalog(None, self.nc_metadata_path, table = basic_ids)
+    else:
+      self.catalog = Catalog(raw_file, self.nc_metadata_path)
+    self.tb = self.catalog.nc_catalog
+    feather.write_feather(self.tb, self.nc_metadata_path)
+
   def __iter__(self):
     pass
-
-  def clean(self):
-    p = self.dir / "metadata_derived.feather"
-    if p.exists():
-      p.unlink()
-
-  @classmethod
-  def from_cache(cls, corpus) -> cls:
-    tb = feather.read_table(corpus.root / "metadata_derived.feather")
-    return cls(corpus, tb)
-
-  @classmethod
-  def from_filenames(cls, corpus) -> cls:
-    ids = []
-    input = corpus.text_input_method(corpus)
-    for i, (doc, text) in enumerate(input):
-      ids.append(doc)
-    # Not usually done, but necessary here to 
-    # because filenames aren't cached.
-    ids.sort()
-    tb = pa.table({"id": pa.array(ids, pa.utf8())})
-    return cls(corpus, tb, materialize = False)
-
-
-  @classmethod
-  def from_ndjson(cls, corpus, file) -> Metadata:
-    """
-    Read metadata from an ndjson file.
-    """
-    tb = pa_json.read_json(file)
-    return cls(corpus, tb)
   
-  @classmethod
-  def from_csv(cls, corpus, file):
-    """
-    Read metadata from an ndjson file.
-    """
-    tb = pa_csv.read_csv(file)
-    return cls(corpus, tb)
+  @property
+  def nc_metadata_path(self):
+    return Path(self.corpus.root / "nonconsumptive_catalog.feather")
 
   @property
   def text_ids(self) -> pa.Table:
+    """
+    Create -- or save -- a folder of textid integer lookups.
+    """
     path = Path(self.corpus.root / "metadata")
     path.mkdir(exist_ok=True)
     dest = path / "textids.feather"
     if dest.exists():
       return feather.read_table(dest)
-    print(self.tb.schema)
-    ints = np.arange(len(self.tb[self.id_field]), dtype = np.uint32)
+
+    ints = np.arange(len(self.tb["@id"]), dtype = np.uint32)
     tb = pa.table([
       pa.array(ints),
-      self.tb[self.id_field]
+      self.tb["@id"]
       ], [
         "bookid",
-        self.id_field
+        "@id"
       ])  
     pa.feather.write_feather(tb, dest)
     return tb
@@ -83,52 +76,11 @@ class Metadata(object):
   @property
   def id_to_int_lookup(self):
     ids = self.text_ids
-    dicto = dict(zip(ids[self.id_field].to_pylist(), ids['bookid'].to_pylist()))
+    dicto = dict(zip(ids["@id"].to_pylist(), ids['bookid'].to_pylist()))
     return dicto
 
-  def parse_raw_arrow(self, tb):
-    """
-    Do some typechecking on the raw arrow. Ensure that the id field is 
-    cast to a string, maybe do some date parsing, that sort of thing.
-
-    kwargs: table metadata arguments.
-    """
-    self.id_field = id_field(tb)
-    columns = {}
-    for field in tb.schema:
-      if field.name == id_field and field.type != pa.utf8():
-        data = tb.column(field.name).cast(pa.utf8())
-      else:
-        data = tb.column(field.name)
-      columns[field.name] = data
-    tb = pa.table(
-      columns
-    )
-    tb = tb.replace_schema_metadata()
-    return tb
-
-
-  @classmethod
-  def from_file(cls, corpus, file):
-    if file is None:
-      for name in ["metadata.ndjson", "metadata.csv", "metadata.feather", "metadata.parquet", "jsoncatalog.txt"]:
-        try:
-          return cls.from_file(corpus, file = corpus.metadata_path)
-        except FileNotFoundError:
-          continue
-      raise FileNotFoundError("No file passed and no default file found.")
-    if file.suffix == ".ndjson":
-      return cls.from_ndjson(corpus, file)
-    if file.name == "jsoncatalog.txt":
-      return cls.from_ndjson(corpus, file)
-    if file.suffix == ".csv":
-      return cls.from_csv(corpus, file)
-    else:
-      raise FileNotFoundError(f"{file} not loadable.")
-
   def get(self, id) -> dict:
-    
-    matching = pc.filter(self.tb, pc.equal(self.tb[self.id_field], pa.scalar(id)))
+    matching = pc.filter(self.catalog, pc.equal(self.catalog["@id"], pa.scalar(id)))
     try:
       assert(matching.shape[0] == 1)
     except:
@@ -180,14 +132,83 @@ def wrap_arrays_as_column(ndjson_file, columns, new_dest):
             Path(new_dest).unlink()
         (d / 'converted.json').replace(new_dest)
     return new_dest
+
 class Catalog():
-    def __init__(self, tb, relations = None, schema = {}, exclude_fields = set([])):
+    """
+
+    A catalog represents the elements of the metadata for a corpus that can be expressed 
+    without reference to the full text of that corpus. The distinction here is that
+    catalog parsing can happen independently of the rest of a corpus, while many calls in
+    the metadata class rely on the corpus.
+
+    In theory, the catalog elements here might even be useful in a project like Wax
+    where records represented in a catalog are not even textual.
+
+    """
+    def __init__(self, file: Union[str, Path], final_location: Union[str, Path] = None, identifier = None, exclude_fields = set([]), table = None):
       """
-      Initialized with a table indicating raw metadata.
+      file: the file to load. This can be either a raw csv, json, etc; or a final nonconsumptive parquet/feather file.
+      final_location: If 'file' is not a nonconsumptive catalog, the location at which one should be stored.
+
+      identifier: the field containing a unique id for each item. If None, will use 
+      {'@id', 'id', or 'filename'} if they are in the set. (In that order, except if
+      one appears as the first column, in which case the first-column one will be 
+      preferred.)
+
+      schema: passed to nonconsumptive metadata
+
+      table: an instantiated table from somewhere else. Can be used as an input.
       """
-      self.tb = tb
-      self.relations = relations
-      self.key = self.primary_key
+
+      if file is None and final_location is not None:
+        file = final_location
+      
+      self.file = Path(file)
+      if self.file.suffix == ".gz":
+        self.compression = ".gz"
+        self.format = self.file.with_suffix("").suffix
+      else:
+        self.compression = None
+        self.format = self.file.suffix
+      self.final_location = Path(final_location)
+      self.tb = None
+      self.identifier = None
+
+      if self.format == ".feather":
+        if not table:
+          self.tb = feather.read_table(self.file)
+        else:
+          self.tb = table
+        try:
+          self.nc_schema = self.tb.schema.metadata.get(b"nonconsumptive")
+          return
+        except:
+          self.raw_tb = self.tb
+          self.tb = None
+      assert self.final_location.suffix == ".feather"
+      if self.tb is None:
+        self.load_preliminary_file(self.file)
+      if self.identifier is None:
+        self.identifier = id_field(self.raw_tb)
+
+    def load_preliminary_file(self, path):
+      if self.format == ".ndjson" or self.format == "jsoncatalog.txt":
+        self.load_ndjson(path)
+      elif self.format == ".csv":
+        self.load_csv(path)
+
+    def load_ndjson(self, file):
+      """
+      Read metadata from an ndjson file.
+      """
+      if self.compression == ".gz":
+        file = gzip.open(file)
+      self.raw_tb = pa_json.read_json(file)
+
+    def load_csv(self, file):
+      if self.compression == ".gz":
+        file = gzip.open(file)
+      self.raw_tb = pa_csv.read_csv(file)
 
     def to_flat_catalog(self, metadata) -> None:
       """
@@ -204,7 +225,6 @@ class Catalog():
       tables['catalog']['bookid'] = \
         tables['fastcat']['bookid']
       for name, col in zip(rich.column_names, rich.columns):
-        print(name)
         if pa.types.is_string(col.type):
           tables['catalog'][name] = col
         elif pa.types.is_integer(col.type):
@@ -222,26 +242,25 @@ class Catalog():
       for table_name in tables.keys():
         parquet.write_table(pa.table(tables[table_name]), outpath  / (table_name + ".parquet"))
 
-
-    def columns(self):
-      for col, name in zip(self.tb.columns, self.tb.schema.fields):
-        yield Column(col, name)
-
-    def primary_key(self):
-      for f in self.schema.fields:
-        if f.name in self.relations:
-          return f.name
-
-    def feather_ld(self):
+    @property
+    def metadata(self):
+      return {
+        'version': nc.__version__
+      }
+    @property
+    def nc_catalog(self):
+      if self.tb:
+        return self.tb
       fields = []
-      for name in self.tb.schema.names:
-        col = Column(self.tb[name], name)
+      for name in self.raw_tb.schema.names:
+        role = None
+        if name == self.identifier:
+          role = "identifier"
+        col = Column(self.raw_tb[name], name, role)
         fields.append(col.field())
       schemas, columns = zip(*fields)
-      return pa.table(columns, schema = pa.schema(schemas))
-    def feather_flat(self):
-      pass
-
+      self.tb = pa.table(columns, schema = pa.schema(schemas, metadata = {'nonconsumptive': json.dumps(self.metadata)}))
+      return self.tb
 
 class Column():
     """
@@ -251,16 +270,36 @@ class Column():
     Provides support for casting into dictionary encoded forms with metadata 
     for further use in nonconsumptive data.
     """
-    def __init__(self, data, name):
+    def __init__(self, data: pa.ChunkedArray, name, role = None):
+      # Sometimes we gotta cast to polars.
+      self._pl = None
+      self.name = name
+      self.role = role
+      self.meta = {}
+      self._best_form = None
+      if isinstance(data.type, pa.ListType):
+        self.parent_list_indices = pa.chunked_array([d.offsets for d in data.chunks])
+        self.c = pa.chunked_array([d.flatten() for d in data.chunks])
+      else:
         self.c = data
-        self.name = name
-        self.meta = {}
+        self.parent_list_indices = None
         
     def to_pyarrow(self):
         pass
     
+    @property
+    def pl(self):
+      if self._pl is not None:
+        return self._pl
+      else:
+#        self._pl = pl.from_arrow(self.c.combine_chunks())
+        # wrap in a table first b/c polars doesn't like types arrays.
+        self._pl = pl.from_arrow(pa.table({self.name: self.c}))[self.name]
+        return self._pl
+
     def integer_form(self, dtype = pa.uint64()):
         itype = None
+        # Trying uint types as well to catch things that max out at--say--between 128 and 255.
         for dtype in [pa.int64(), pa.uint64(), pa.int32(), pa.uint32(), pa.int16(), pa.uint16(), pa.int8(), pa.uint8()]:
             try:
                 c = self.c.cast(dtype)
@@ -273,89 +312,129 @@ class Column():
             raise pa.ArrowInvalid("No integer reading possible")
         return self.c.cast(itype)
     
+    @property
     def date_form(self):
-        try:
-            return self.c.cast(pa.date32())
-        except pa.ArrowInvalid:
-            return None
-    
+      datelike_share = pc.mean(pc.match_substring_regex(self.c, "[0-9]{3,4}-[0-1]?[0-9]-[0-3]?[0-9]").cast(pa.int8()))
+      if pc.greater(datelike_share, pa.scalar(.95)).as_py():
+        return self.pl.str_parse_date(pl.datatypes.Date32, "%Y-%m-%d").to_arrow()
+      else:
+        raise ValueError(f"only {datelike_share} of values look like a date string.")
+
     def as_dictionary(self, thresh = .75):
-        distinct, total = self.cardinality()
-        if distinct/total < thresh:
-            return self.freq_dict.encode()
+      distinct, total = self.cardinality()
+      if distinct/total < thresh:
+          return self.freq_dict.encode()
         
     def freq_dict_encode(self, nt = pa.int32()):
-        counts = pa.RecordBatch.from_struct_array(self.c.value_counts())
-        # sort decreasing
-        counts = counts.take(pc.sort_indices(pa.Table.from_batches([counts]), sort_keys = [("counts", "descending")]))
-        ids = np.arange(len(counts))
-        idLookup = pa.table({
-            f"{self.name}__id": ids,
-            f"{self.name}": counts['values']
-            , f"_count": counts['counts']      
-        })
-        
-        indices = pc.index_in(self.c, value_set=counts['values']).cast(nt)
-        return pa.DictionaryArray.from_arrays(indices.combine_chunks(), idLookup[self.name].combine_chunks())
+      """
+      Convert into a dictionary where keys are ordered by count.
 
-        return idLookup
-        indices = pc.index_in(self.c, options=pc.SetLookupOptions(value_set=counts['values']))
-        return indices, idLookup
-        
-    @property
-    def is_list(self):
-        return isinstance(self.c.type, pa.ListType)
+      """
+      counts = pa.RecordBatch.from_struct_array(self.c.value_counts())
+      # sort decreasing
+      counts = counts.take(pc.sort_indices(pa.Table.from_batches([counts]), sort_keys = [("counts", "descending")]))
+      ids = np.arange(len(counts))
+      idLookup = pa.table({
+          f"{self.name}__id": ids,
+          f"{self.name}": counts['values']
+          , f"_count": counts['counts']      
+      })
+      indices = pc.index_in(self.c, value_set=counts['values']).cast(nt)
+      return pa.DictionaryArray.from_arrays(indices.combine_chunks(), idLookup[self.name].combine_chunks(), ordered = True)
+
     
     def cardinality(self):
       c = self.c
-      if self.is_list:
-        c = pc.list_flatten(c)
       return len(pc.unique(c)), len(c)
 
-    def top_values(self):
-      if isinstance(self.c.type, pa.DictionaryType):
-        pass
-
-    def quantiles(self, qs = [0, .005, .05, .5, .95, .995, 1]):
+    def quantiles(self, qs = [0, .005, .05, .25, .5, .75, .95, .995, 1]):
         try:
-            quantiles = pc.quantile(self.c, q = qs)
+            quantiles = pc.quantile(self.best_form, q = qs)
         except pa.ArrowNotImplementedError:
+          try:
+            min = pc.min_max(self.best_form).to_py()
+            qs = [0, 1]
+            quantiles = [min, max]
+          except pa.ArrowNotImplementedError:
             return None
         return list(zip(qs, quantiles.to_pylist()))
 
     @property
     def metadata(self):
-        # quantiles
-        quant = self.quantiles()
-        if quant:
-            self.meta['quantiles'] = json.dumps(quant)
-        return self.meta
-    
+      # quantiles
+      quant = self.quantiles()
+      if quant:
+        self.meta['quantiles'] = json.dumps(quant)
+      if pa.types.is_dictionary(self.best_form.type):
+        self.meta['top_values'] = json.dumps(self.best_form.dictionary[:10].to_pylist())
+      return self.meta
+
+    def relist(self, form):
+      # Convert back to a list form from an unnested one after type coercion.
+      if self.parent_list_indices is None:
+        return form
+      return pa.ListArray.from_arrays(self.parent_list_indices.combine_chunks(), form.combine_chunks())
+      
     def field(self):
-        form = self.best_form
-        return (pa.field(
-            name = self.name,
-            type = form.type,
-            metadata= self.metadata
-        ), form)
+      form = self.best_form
+      form = self.relist(form)
+      if self.role == "identifier":
+        self.name = "@id"
+      return (pa.field(
+          name = self.name,
+          type = form.type,
+          metadata= self.metadata
+      ), form)
 
     @property
     def best_form(self):
-        try:
-            return self.integer_form()
-        except pa.ArrowInvalid:
-            pass
+      if self._best_form:
+        return self._best_form
+      if self.role == "identifier":
+        self._best_form = self.c.cast(pa.string())
+        return self._best_form
+      try:
+          self._best_form = self.integer_form()
+          return self._best_form
+      except pa.ArrowInvalid:
+          pass
+      try:
+          self._best_form = self.c.cast(pa.float32())
+          return self._best_form
+      except pa.ArrowInvalid:
+          pass
+      except pa.ArrowNotImplementedError:
+        pass
+      try:
+        self._best_form = self.date_form
+        return self._best_form
+      except pa.ArrowInvalid:
+        pass
+      except ValueError:
+        pass
+      try:
         counts, total = self.cardinality()
         if counts / total < .5:
             try:
-                return self.dict_encode()
+                self._best_form = self.dict_encode()
+                return self._best_form
             except pa.ArrowInvalid:
                 pass
-        return self.c
-    
-    def extract_year(self, str):
-        replaced = pc.replace_substring_regex(str, pattern = ".*([0-9]{4})?.*", replacement = r"\1")
-        return replaced.cast(pa.int16())
+      except pa.ArrowCapacityError:
+        # Strings can overflow here. Probably a safer way to check this.
+        pass
+      return self.c
+  
+    def extract_year(self, arr):
+      """
+      Aggressively search for years in a field using regular expressions, and turn
+      into integers. For people with
+      datasets that include a lot of `c. 1875`, and so on.
+
+      Will not work on years before 1000.
+      """
+      replaced = pc.replace_substring_regex(arr, pattern = ".*([0-9]{4})?.*", replacement = r"\1")
+      return replaced.cast(pa.int16())
     
     def dict_encode(self):
         if self.cardinality()[0] < 2**7:
@@ -364,7 +443,4 @@ class Column():
             nt = pa.int16()
         else:
             nt = pa.int32()
-        if self.is_list:
-            return pa.array(self.c.to_pylist(), pa.list_(pa.dictionary(nt, pa.string())))
-        else:
-            return self.freq_dict_encode(nt)
+        return self.freq_dict_encode(nt)

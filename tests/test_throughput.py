@@ -4,9 +4,12 @@ import pandas as pd
 from nonconsumptive import Corpus
 import pyarrow as pa
 
-@pytest.fixture(scope="module")
-def simple_corpus():
-    return Corpus(texts = Path('tests', 'corpora', 'test1', 'texts'), dir = "tmp", format = "txt", cache_set = {})
+@pytest.fixture(scope="function")
+def simple_corpus(tmpdir_factory):
+    dir = Path(str(tmpdir_factory.mktemp("testing")))
+    return Corpus(texts = Path('tests', 'corpora', 'test1', 'texts'), 
+                  metadata = None,
+                  dir = dir, cache_set = {})
 
 class TestVolume():
     def test_text_iteration(self, simple_corpus):
@@ -26,7 +29,7 @@ class TestVolume():
         ids = []
         texts = []
         for batch in simple_corpus.tokenization:
-            ids.append(batch.schema.metadata.get(b'id').decode("utf-8"))
+            ids.append(batch.schema.metadata.get(b'@id').decode("utf-8"))
             texts.append(batch['token'].to_pylist())
         assert len(ids) == 3
         assert sum(map(len, texts)) == 42
@@ -36,11 +39,12 @@ class TestVolume():
         words = []
         counts = 0
         for batch in simple_corpus.token_counts:
-            ids.append(batch.schema.metadata.get(b'id').decode("utf-8"))
+            ids.append(batch.schema.metadata.get(b'@id').decode("utf-8"))
             counts += sum(batch['count'].to_pylist())
             words = words + batch['token'].to_pylist()
         assert len(ids) == 3
         assert "wife" in words
+        assert "каждая" in words
         assert counts == 42
 
     def test_total_wordcounts(self, simple_corpus):
@@ -63,9 +67,7 @@ class TestVolume():
 
     def test_encode_wordcounts(self, simple_corpus):
         total = 0
-
         for batch in simple_corpus.encoded_wordcounts:
-            print("GAHH", batch.to_pandas())
             total += batch.to_pandas()['count'].sum()
             assert batch.to_pandas().shape[1] == 3
         assert total == 42

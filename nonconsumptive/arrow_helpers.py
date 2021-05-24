@@ -5,4 +5,4 @@ def batch_id(batch):
   """
 
   """
-  return batch.schema.metadata.get(b'id').decode('utf-8')
+  return batch.schema.metadata.get(b'@id').decode('utf-8')

@@ -3,22 +3,23 @@ from .document import Document
 from pyarrow import parquet, feather, ipc
 from pyarrow import compute as pc
 import pyarrow as pa
-
 import json
 import yaml
 import uuid
 import numpy as np
-from .prefs import prefs
+from numpy import packbits
 import logging
+from typing import Callable, Iterator, Union, Optional, List
+from .prefs import prefs
 from .metadata import Metadata
 from .arrow_helpers import batch_id
 
-from typing import Callable, Iterator, Union, Optional, List
+SRP = None
 
 class Reservoir(object):
   __doc__ = """
 
-  A store for holding, writing, and accessing tables in parquet files.
+  A store for holding, writing, and accessing tables on disk.
 
   """
 
@@ -34,6 +35,7 @@ class Reservoir(object):
 
     batch_size: number of bytes to write to each file before creating a new 
       one. Can be larger than memory.
+
     """
     self.corpus = corpus
     if dir is None:
@@ -50,6 +52,7 @@ class Reservoir(object):
 
   def empty(self):
     # Check if any items have been created.
+    print("PATH", self.path)
     for _ in self.path.glob(f"**/*.{self.format}"):
       return False
     return True
@@ -59,11 +62,18 @@ class Reservoir(object):
     pass
 
   def build_cache(self):
-      raise NotImplementedError("Class does not allow caching.")
+    raise NotImplementedError("Class does not allow caching.")
 
   def iter_cache(self):
-      raise NotImplementedError("Class does not allow caching.")
+    raise NotImplementedError("Class does not allow caching.")
   
+  def id_in_metadata(self):
+    try:
+      _ = self.arrow_schema.field('@id')
+      return True
+    except KeyError:
+      return False
+
   def __iter__(self):
     if self.empty():
       if self.name in self.corpus.cache_set:
@@ -74,7 +84,6 @@ class Reservoir(object):
       else:
         for b in self._from_upstream():
           assert b.schema.metadata
-
           yield b
     else:
       for batch in self.iter_cache():
@@ -96,73 +105,6 @@ class Reservoir(object):
         self._id_map[id] = p
     return self._id_map
 
-
-class OldParquetMethods():
-  def __init__(self):
-      pass
-  def create(self):
-    max_size = self.batch_size
-    self.queue = []
-    queue_size = 0
-
-    for document in self.corpus.documents():
-      if document.id in self.id_map:
-        continue
-      try:
-        tokens = document.tokenize()
-      except:
-        print(document.id)
-        continue
-      # Could speed up.Tokenization
-      ids = pa.array([document.id] * len(tokens), pa.utf8())
-      batch = pa.RecordBatch.from_arrays(
-        [
-          ids,
-          tokens
-        ],
-        schema = pa.schema(self.arrow_schema,
-        metadata = {b"id": document.id.encode("utf-8")})
-      )
-      self.queue.append((document.id, batch))
-      queue_size += batch.nbytes
-      if queue_size > max_size:
-        self.flush() # Intermedia write
-        queue_size = 0
-    self.flush() # final flush.
-    self._id_map = None
-
-  def flush_batch(self):
-    if len(self.queue) == 0:
-      return
-    logging.warn(f"Flushing {len(self.queue)}")
-    # Get it alphabetically by id
-    self.queue.sort()
-    ids = [q[0] for q in self.queue]
-    schema = self.queue[0][1].schema
-    revised = schema.with_metadata({"ids": "\t".join(ids)})
-    tab = pa.Table.from_batches([q[1] for q in self.queue], schema = revised)
-    fn = self.path / (str(uuid.uuid1()) + ".parquet")
-    parquet.write_table(tab, fn)
-    self.queue = []
-
-  @property
-  def id_map(self):
-    if self._id_map is not None:
-      return self._id_map
-    self._id_map = {}
-    for p in self.path.glob("*.parquet"):
-      ids = parquet.ParquetFile(p).schema_arrow.metadata[b'ids'].decode("utf-8").split("\t")
-      for id in ids:
-        self._id_map[id] = p
-    return self._id_map
-  
-  def fetch(self,
-    value: str,
-  #  filters: List[List[List[str, str, Union[str, int, float, set, list]]]],
-    field: str):
-    pass
-
-
 class Livestream(Reservoir):
   format = None
 
@@ -172,16 +114,52 @@ class ArrowReservoir(Reservoir):
   def open_writer(self):
     # Until arrow supports metadata on record batches for ipc, not just 
     # tables (which I'm pretty sure it doesn't; https://issues.apache.org/jira/browse/ARROW-6940)
-
-    self.ids = []
     self.current_file_uuid = str(uuid.uuid1())
     self.bytes = 0
     self.batches = 0
-
+    print(r"\b")
     path = self.path / (self.current_file_uuid + ".ipc")
     fout = pa.ipc.new_file(path, schema = pa.schema(self.arrow_schema), 
       options=pa.ipc.IpcWriteOptions(compression = "zstd"))
     return fout
+
+  def build_cache(self, chunk_size = 1024 * 1024 * 256, max_size = 5e08, max_files = 1e06):
+    """
+    chunk_size: Max size of memory record batch, bytes. Default 256 MB.
+    max_size:  Max size of reservoir files, in bytes.
+    max_files: Max documents in a single reservoir file.
+    """
+    mem_size = 0
+    sink = self.open_writer()
+    cache = []
+    for batch in self._from_upstream():
+      cache.append(batch)
+      mem_size += batch.nbytes
+      self.batches += 1
+      self.bytes += batch.nbytes
+      if mem_size > chunk_size:
+        all = pa.Table.from_batches(cache).combine_chunks()
+        for megabatch in all.to_batches():
+          sink.write_batch(megabatch)
+          yield megabatch
+          mem_size = 0
+      if self.bytes > max_size or self.batches > max_files:
+        sink.close()
+        self.flush_ids()
+        sink = self.open_writer()
+        mem_size = 0
+        self.batches = 0
+    all = pa.Table.from_batches(cache).combine_chunks()
+    for megabatch in all.to_batches():
+      sink.write_batch(megabatch)
+      yield megabatch
+    sink.close()
+    self.flush_ids()
+
+class ArrowIDBatchReservoir(ArrowReservoir):
+  def open_writer(self):
+    self.ids = []
+    return super().open_writer()
 
   def flush(self):
       pass
@@ -196,23 +174,24 @@ class ArrowReservoir(Reservoir):
     print("Building cache")
     sink = self.open_writer()
     for batch in self._from_upstream():
-        assert(batch.schema.metadata)
-        yield batch
-        self.ids.append(batch_id(batch))
-        sink.write_batch(batch)
-        self.batches += 1
-        self.bytes += batch.nbytes
-        if self.bytes > max_size or self.batches > max_files:
-          sink.close()
-          self.flush_ids()
-          sink = self.open_writer()
+      assert(batch.schema.metadata)
+      yield batch
+      self.ids.append(batch_id(batch))
+      sink.write_batch(batch)
+      self.batches += 1
+      self.bytes += batch.nbytes
+      if self.bytes > max_size or self.batches > max_files:
+        sink.close()
+        self.flush_ids()
+        sink = self.open_writer()
+        self.batches = 0
     sink.close()
     self.flush_ids()
 
   def flush_ids(self):
-      path = self.path / (self.current_file_uuid + ".json")
-      json.dump(self.ids, path.open("w"))
-      self.ids = []
+    path = self.path / (self.current_file_uuid + ".json")
+    json.dump(self.ids, path.open("w"))
+    self.ids = []
 
   @property
   def id_location_map(self):
@@ -233,20 +212,20 @@ class ArrowReservoir(Reservoir):
     tab = pa.table(
       {
         'file': files,
-        'id': ids,
+        '@id': ids,
         'batch': batch_numbers
       })
-    tab = tab.take(pc.sort_indices(tab['id']))
+    tab = tab.take(pc.sort_indices(tab['@id']))
     parquet.write_table(tab, dest)
     return dest
 
-  def get_id(self, id):
+  def get_id(self, id) -> pa.RecordBatch: 
     if self.empty():
       for r in self.build_cache():
         pass
-    rows = parquet.read_table(self.id_location_map, filters = [(('id', '==', id))])
+    rows = parquet.read_table(self.id_location_map, filters = [(('@id', '==', id))])
     dicto = rows.to_pydict()
-    file = dicto['file'][0] + ".ipc"
+    file = dicto['file'][0] + self.format
     batch = dicto['batch'][0]
     with ipc.open_file(self.path / file) as f:
       return f.get_batch(batch)
@@ -254,12 +233,75 @@ class ArrowReservoir(Reservoir):
   def iter_cache(self) -> Iterator[pa.RecordBatch]:
     for file in self.path.glob("*.ipc"):
       fin = pa.ipc.open_file(file)
+      # Must store metadata in json b/c not supported in IPC record batch writer
+      # at the moment.
       ids = json.load(file.with_suffix(".json").open())
       for i in range(fin.num_record_batches):
         batch = fin.get_batch(i)
-        batch = batch.replace_schema_metadata({"id": ids[i]})
+        batch = batch.replace_schema_metadata({"@id": ids[i]})
         assert batch.schema.metadata
         yield batch
 
-class ParquetReservoir(Reservoir):
-  format = "parquet"
+
+class SRP_set(ArrowReservoir):
+  """ 
+  Embed a set of tokencounts into a fixed high-dimensional
+  space for comparisons. You've got to persist this to disk, because it 
+  would be a gratuitous waste of energy not to and I'm not cool with that.
+  """
+  name = "SRP"
+  schema = pa.schema({
+    "@id": pa.string(),
+    "SRP": pa.list_(pa.float32(), int(1280)),
+    "SRP_bits": pa.binary(int(1280) // 8)
+  })
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.corpus.cache_set.add("SRP")
+
+  def _from_upstream(self) -> Iterator[pa.RecordBatch]:
+    # Yields 1-row batches. These can be assembled later into longer ones; the 
+    # SRP step is expensive enough that it's NBD to wait.
+    global SRP
+    if SRP is None:
+      import SRP
+    hasher = SRP.SRP(dim = int(dims), cache = True)
+    for batch in self.corpus.tokenization:
+      # At a first pass, 
+      id = batch_id(batch)
+      tokens = batch['token'].to_pylist()    
+      counts = batch['count'].to_numpy()
+      hash_rep = hasher.stable_transform(words = tokens, counts = counts)
+      bit_rep = packbits(hash_rep > 0).tobytes()
+      yield pa.record_batch([
+          pa.array([id], self.arrow_schema[0].type),
+          pa.array([hash_rep], self.arrow_schema[1].type),
+          pa.array([bit_rep], self.arrow_schema[2].type)
+      ])
+
+
+  def build_cache(self, max_size = 5e08, max_files = 1e06):
+    """
+
+    max_size:  Max size of reservoir files, in bytes.
+    max_files: Max documents in a single reservoir file.
+    """
+
+    print("Building cache")
+    sink = self.open_writer()
+    for batch in self._from_upstream():
+      assert(batch.schema.metadata)
+      yield batch
+      if not '@id' in self.arrow_schema:
+        self.ids.append(batch_id(batch))
+        sink.write_batch(batch)
+      self.batches += 1
+      self.bytes += batch.nbytes
+      if self.bytes > max_size or self.batches > max_files:
+        sink.close()
+        self.flush_ids()
+        sink = self.open_writer()
+        self.batches = 0
+    sink.close()
+    self.flush_ids()
+

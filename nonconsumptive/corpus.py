@@ -13,8 +13,8 @@ import polars as pl
 
 from .prefs import prefs
 from .metadata import Metadata
-from .data_storage import ArrowReservoir
-from .inputs import FolderInput, SingleFileFormat
+from .data_storage import ArrowReservoir, ArrowIDBatchReservoir
+from .inputs import FolderInput, SingleFileInput, MetadataInput
 from .arrow_helpers import batch_id
 # Custom type hints
 
@@ -24,8 +24,7 @@ _Path = Union[str, Path]
 class Corpus():
   def __init__(self, dir, texts = None, 
                      metadata = None, cache_set = None, 
-                     format = None, compression = None, 
-                     text_input_method = None):
+                     text_options = {"format": None, "compression": None}):
     """Create a corpus
 
     Arguments:
@@ -39,7 +38,6 @@ class Corpus():
                  defaults will be taken from .prefs().
     format    -- The text format used ('.txt', '.html', '.tei', '.md', etc.)
     compression -- Compression used on texts. Only '.gz' currently supported.
-    text_input_method -- deprecated?
 
     """
     if texts is not None: 
@@ -54,39 +52,50 @@ class Corpus():
     self._metadata = None
     # which items to cache.
     self._cache_set = cache_set
-    self.format = format
-    if self.format is None:
+
+    if "format" in text_options and text_options['format'] is not None:
+      self.format = text_options["format"]
+    else:
       self.format = "txt"
-    self.compression = compression
-    self._text_input_method = text_input_method
+
+    if "compression" in text_options:
+      self.compression = text_options["compression"]
+    else:
+      self.compression = None
+
+    if "text_field" in text_options:
+      self.text_field = text_options["text_field"]
+    else:
+      self.text_field = None
+
+    self._texts = None
 
   def setup_input_method(self, full_text_path, method):
     if method is not None:
       return method
     if full_text_path.is_dir():
-      return 
+      return
 
-  @property 
-  def texts(self):
-    return self.text_input_method(self, compression = self.compression, format = self.format)
-    
   @property
-  def text_input_method(self):
+  def texts(self):
     # Defaults based on passed input. This may become the only method--
     # it's not clear to me why one should have to pass both.
-    if self._text_input_method is None:
-      if self.full_text_path is None:
-        raise NotImplementedError("Streams not suppported. Must pass a file.")
-      if self.full_text_path.is_dir():
-        self._text_input_method = "folder"
-      if self.full_text_path.is_file():
-        self._text_input_method = "input.txt"
-    if self._text_input_method == "folder":
+    if self._texts is not None:
+      return self._texts
+    if self.text_field is not None:
+      if self.full_text_path is not None:
+        raise ValueError("Can't pass both a full text path and a key to use for text inside the metadata.")
+      self._texts = MetadataInput(self)
+    elif self.full_text_path.is_dir():
       self.text_location = self.full_text_path
       assert self.text_location.exists()
-      return FolderInput
-    elif self._text_input_method == "input.txt":
-      return SingleFileFormat
+      self._texts = FolderInput(self, compression = self.compression, format = self.format)
+      print("\n\n", self._texts, "\n\n")
+    elif self.full_text_path.exists():
+      self._texts =  SingleFileInput(self, compression = self.compression, format = self.format)
+    else:
+      raise NotImplementedError("No way to handle desired texts. Please pass a file, folder, or metadata field.")
+    return self._texts
 
   def clean(self, targets = ['metadata', 'tokenization', 'token_counts']):
     import shutil
@@ -97,15 +106,8 @@ class Corpus():
   def metadata(self) -> Metadata:
     if self._metadata is not None:
       return self._metadata
-    derived = Path(self.root / "metadata_derived.parquet")
-    if derived.exists():
-      self._metadata = Metadata.from_file(self, derived)
-    try:
-      mf = prefs('paths.metadata_file')
-      print("\n\n", mf, "\n\n")
-      self._metadata = Metadata.from_file(self, mf)
-    except:
-      self._metadata = Metadata.from_filenames(self)
+    mf = prefs('paths.metadata_file')
+    self._metadata = Metadata(self, self.metadata_path)
     return self._metadata
 
   @property
@@ -141,14 +143,14 @@ class Corpus():
     """
     tokenizer = Quadgrams(self)
     return tokenizer
-  @property 
 
+  @property 
   def quintgrams(self):
     """
     returns a reservoir that iterates over tokenized 
     arrow batches of documents as arrow arrays. 
     """
-    tokenizer = Quadgrams(self)
+    tokenizer = Quintgrams(self)
     return tokenizer
 
   @property 
@@ -177,7 +179,6 @@ class Corpus():
     
   @property
   def documents(self):
-    
     if self.metadata and self.metadata.tb:        
       for id in self.metadata.tb[self.metadata.id_field]:
         yield Document(self, str(id))
@@ -186,10 +187,12 @@ class Corpus():
     return Document(self, id)
 
   @property
-  def total_wordcounts(self, max_bytes=100_000_000) -> pa.Table:
+  def total_wordcounts(self, max_bytes:int=100_000_000) -> pa.Table:
     cache_loc = self.root / "wordids.parquet"
     if cache_loc.exists():
+      logging.debug("Loading word counts from cache")
       return parquet.read_table(cache_loc)
+    logging.info("Building word counts")
     counter = bounter(2048)
     for token, count in self.token_counts:
       dicto = dict(zip(token.to_pylist(), count.to_pylist()))
@@ -233,7 +236,7 @@ class Corpus():
 
     for batch in self.token_counts:
         try:
-            id = batch.schema.metadata.get(b"id").decode("utf-8")
+            id = batch_id(batch)
             bookid = bookid_lookup[id]
         except KeyError:
             raise
@@ -255,22 +258,31 @@ class Corpus():
     q = wordids.join(remainder, left_on=["token"], right_on=["token"], how="inner", )
     for b in q.to_arrow().select(["bookid", "wordid", "count"]).to_batches():
         yield b
-  @property
-  def bookid_wordcounts(self):
-    bookid_lookup = self.metadata.id_to_int_lookup
+
+  def document_wordcounts(self, key = "@id") -> pa.Table:
+    """
+    Tokencounts for each document.
+
+    key: either @id (the native id in the schema) or "bookid" 
+    (the generated integer id.)
+    """
     ids, counts = [], []
-    cache_size = 0
+    if key == 'bookid':
+      lookup = self.metadata.id_to_int_lookup
     for batch in self.token_counts:
-        try:
-            id = batch.schema.metadata.get(b"id").decode("utf-8")
-            bookid = bookid_lookup[id]
-        except KeyError:
-            raise
+        id = batch_id(batch)
+        if key == 'bookid':
+          try:
+            id = lookup[id]
+          except KeyError:
+            logging.warning(f"Missing bookid for {id}")
+            continue
         count = pc.sum(batch['count']).as_py()
-        ids.append(bookid)
+        ids.append(id)
         counts.append(count)
-    return pa.table([pa.array(ids, pa.uint32()), pa.array(counts, pa.uint32())],
-        names = ['bookid', 'nwords'])
+    return pa.table([pa.array(ids, pa.string()), pa.array(counts, pa.uint32())],
+        names = [key, 'nwords'])
+      
   def write_feature_counts(self,
     single_files:bool = True,
     chunk_size:Optional[int] = None,
@@ -278,7 +290,6 @@ class Corpus():
     
     """
     Write feature counts with metadata for all files in the document.
-
     dir: the location to place files into.
     chunking: whether to break up files into chunks of n words.
     single_files: Whether to write file per document, or group into batch
@@ -321,8 +332,7 @@ class Corpus():
     id = self.metadata.tb.column(self.metadata.id_field)[i].as_py()
     return Document(self, id)
 
-
-class Tokenization(ArrowReservoir):
+class Tokenization(ArrowIDBatchReservoir):
   name = "tokenization"
   arrow_schema = pa.schema({
     'token': pa.utf8()
@@ -333,22 +343,22 @@ class Tokenization(ArrowReservoir):
       tokens = tokenize(text)
       yield pa.record_batch(
         [tokens],
-        schema=self.arrow_schema.with_metadata({"id": id})
+        schema=self.arrow_schema.with_metadata({"@id": id})
       )
 
-class TokenCounts(ArrowReservoir):
+class TokenCounts(ArrowIDBatchReservoir):
   name = "token_counts"
-  arrow_schema = {
+  arrow_schema = pa.schema({
     'token': pa.utf8(),
     'count': pa.uint32()
-  }
+  })
 
   def _from_upstream(self) -> Iterator[pa.RecordBatch]:
     for batch in self.corpus.tokenization:
-      id = batch.schema.metadata.get(b"id").decode("utf-8")
+      id = batch_id(batch)
       yield token_counts(batch['token'], id)
 
-class Ngrams(ArrowReservoir):
+class Ngrams(ArrowIDBatchReservoir):
   def __init__(self, ngrams: int, corpus: Corpus, end_chars: List[str] = [], beginning_chars: List[str] = [], **kwargs):
     """
 
@@ -404,7 +414,7 @@ class Ngrams(ArrowReservoir):
       for i in range(ngrams):
           cols.append(counts[f'token{i+1}'].to_arrow().cast(pa.string()))
       cols.append(counts['count'].to_arrow())
-      yield pa.RecordBatch.from_arrays(cols, schema=self.arrow_schema.with_metadata({'id': batch_id(batch)}))
+      yield pa.RecordBatch.from_arrays(cols, schema=self.arrow_schema.with_metadata({'@id': batch_id(batch)}))
 
 class Bigrams(Ngrams):
   """

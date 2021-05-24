@@ -101,5 +101,5 @@ def token_counts(tokens: pa.Array, id: str) -> pa.RecordBatch:
       "token": pa.utf8(),
       "count": pa.uint32()
     },
-    metadata={'id': id})
+    metadata={'@id': id})
     )
