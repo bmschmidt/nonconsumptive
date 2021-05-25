@@ -43,8 +43,31 @@ class TestMetadata():
     assert len(tb) == 3    
   def test_feather_files_written(self, tmpdir):
     pass
-  def test_subsequent_loads_use_cache(self):
-    pass
+
+  def test_cache_creation(self, corrected_dissertations, tmpdir):
+    path = Path(str(tmpdir))
+    first_pass = Corpus(texts = None,
+            metadata = corrected_dissertations,
+            dir = path,
+            text_options = {"text_field" : "dissertation"})
+    tb = first_pass.metadata.tb
+    assert len(tb) == 12
+    persisted_data = feather.read_table(path / "nonconsumptive_catalog.feather")
+    assert len(persisted_data) == 12
+
+  def test_cache_use(self, corrected_dissertations, tmpdir):
+    path = Path(str(tmpdir))
+    schema = pa.schema({"@id": pa.string()},
+        metadata = {"nonconsumptive": json.dumps({"schema_version": "0.1.0"})})
+    tb = pa.table({"@id": pa.array(["a"])}, schema = schema)
+    feather.write_feather(tb, path / "nonconsumptive_catalog.feather")
+    should_use_cache = Corpus(texts = None,
+            metadata = corrected_dissertations,
+            dir = path,
+            text_options = {"text_field" : "@id"})
+    tb = should_use_cache.metadata.tb
+    assert len(tb) == 1
+
   def test_upstream_changes_invalidate_cache(self):
     pass
   def test_autogenerate_textids(self, dissertation_corpus, non_metadata_corpus):

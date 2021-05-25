@@ -90,7 +90,6 @@ class Corpus():
       self.text_location = self.full_text_path
       assert self.text_location.exists()
       self._texts = FolderInput(self, compression = self.compression, format = self.format)
-      print("\n\n", self._texts, "\n\n")
     elif self.full_text_path.exists():
       self._texts =  SingleFileInput(self, compression = self.compression, format = self.format)
     else:
@@ -106,7 +105,6 @@ class Corpus():
   def metadata(self) -> Metadata:
     if self._metadata is not None:
       return self._metadata
-    mf = prefs('paths.metadata_file')
     self._metadata = Metadata(self, self.metadata_path)
     return self._metadata
 
@@ -280,7 +278,13 @@ class Corpus():
         count = pc.sum(batch['count']).as_py()
         ids.append(id)
         counts.append(count)
-    return pa.table([pa.array(ids, pa.string()), pa.array(counts, pa.uint32())],
+    if key == 'bookid':
+      idtype = pa.uint32()
+    else:
+      idtype = pa.string()
+    ids = pa.array(ids, idtype)
+    counts = pa.array(counts, pa.uint32())
+    return pa.table([ids, counts],
         names = [key, 'nwords'])
       
   def write_feature_counts(self,

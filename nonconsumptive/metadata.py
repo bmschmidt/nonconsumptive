@@ -88,6 +88,39 @@ class Metadata(object):
       raise IndexError(f"Couldn't find solitary match for {id}")
     return {k:v[0] for k, v in matching.to_pydict().items()}
 
+  def to_flat_catalog(self) -> None:
+    """
+    Writes flat parquet files suitable for duckdb ingest or other use
+    in a traditional relational db setting, including integer IDs.
+    """
+    rich = self.tb
+    outpath = self.corpus.root / "metadata" / "flat_catalog"
+    outpath.mkdir(exist_ok = True)
+    tables = defaultdict(dict)
+    textids = self.text_ids
+    tables['fastcat']['bookid'] = \
+      textids['bookid'].take(pc.index_in(textids['@id'], value_set=rich['@id']))
+    tables['catalog']['bookid'] = \
+      tables['fastcat']['bookid']
+    for name, col in zip(rich.column_names, rich.columns):
+      if pa.types.is_string(col.type):
+        tables['catalog'][name] = col
+      elif pa.types.is_integer(col.type):
+        tables['catalog'][name] = col
+        tables['fastcat'][name] = col
+      elif pa.types.is_dictionary(col.type):
+        tables[name + "Lookup"][f'{name}__id'] = pa.array(np.arange(len(col.chunks[-1].dictionary)), col.type.index_type)
+        tables[name + "Lookup"][f'{name}'] = col.chunks[-1].dictionary
+        tables['fastcat'][f'{name}__id'] = pa.chunked_array([chunk.indices for chunk in rich[name].chunks])          
+        tables['catalog'][name] = col # <- Only works b/c parquet has no dict type.
+      elif pa.types.is_list(col.type):
+        print("Skipping list ", name)
+      else:
+        print("WHAT IS ", name)
+    for table_name in tables.keys():
+      parquet.write_table(pa.table(tables[table_name]), outpath  / (table_name + ".parquet"))
+
+
 def id_field(tb: pa.Table) -> str:
   """
   tb: a pyarrow table to find the id field from
@@ -173,7 +206,6 @@ class Catalog():
       self.final_location = Path(final_location)
       self.tb = None
       self.identifier = None
-
       if self.format == ".feather":
         if not table:
           self.tb = feather.read_table(self.file)
@@ -185,14 +217,26 @@ class Catalog():
         except:
           self.raw_tb = self.tb
           self.tb = None
-      assert self.final_location.suffix == ".feather"
+      self.load_existing_nc_metadata()
+
       if self.tb is None:
         self.load_preliminary_file(self.file)
-      if self.identifier is None:
-        self.identifier = id_field(self.raw_tb)
+        if self.identifier is None:
+          self.identifier = id_field(self.raw_tb)
+      else:
+        self.identifier = "@id"
+
+    def load_existing_nc_metadata(self):
+      if not self.final_location.exists():
+        return
+      if self.final_location.stat().st_mtime < self.file.stat().st_mtime:
+        # Remove the cache
+        self.final_location.unlink()
+        return None
+      self.tb = feather.read_table(self.final_location)
 
     def load_preliminary_file(self, path):
-      if self.format == ".ndjson" or self.format == "jsoncatalog.txt":
+      if self.format == ".ndjson" or path.name == "jsoncatalog.txt" or path.name == "jsoncatalog.txt.gz":
         self.load_ndjson(path)
       elif self.format == ".csv":
         self.load_csv(path)
@@ -209,38 +253,6 @@ class Catalog():
       if self.compression == ".gz":
         file = gzip.open(file)
       self.raw_tb = pa_csv.read_csv(file)
-
-    def to_flat_catalog(self, metadata) -> None:
-      """
-      Writes flat parquet files suitable for duckdb ingest or other use
-      in a traditional relational db setting, including integer IDs.
-      """
-      rich = self.feather_ld()
-      outpath = metadata.corpus.root / "metadata" / "flat_catalog"
-      outpath.mkdir(exist_ok = True)
-      tables = defaultdict(dict)
-      textids = metadata.text_ids
-      tables['fastcat']['bookid'] = \
-        textids['bookid'].take(pc.index_in(textids['filename'], value_set=rich['filename']))
-      tables['catalog']['bookid'] = \
-        tables['fastcat']['bookid']
-      for name, col in zip(rich.column_names, rich.columns):
-        if pa.types.is_string(col.type):
-          tables['catalog'][name] = col
-        elif pa.types.is_integer(col.type):
-          tables['catalog'][name] = col
-          tables['fastcat'][name] = col
-        elif pa.types.is_dictionary(col.type):
-          tables[name + "Lookup"][f'{name}__id'] = pa.array(np.arange(len(col.chunks[-1].dictionary)), col.type.index_type)
-          tables[name + "Lookup"][f'{name}'] = col.chunks[-1].dictionary
-          tables['fastcat'][f'{name}__id'] = pa.chunked_array([chunk.indices for chunk in rich[name].chunks])          
-          tables['catalog'][name] = col # <- Only works b/c parquet has no dict type.
-        elif pa.types.is_list(col.type):
-          print("Skipping list ", name)
-        else:
-          print("WHAT IS ", name)
-      for table_name in tables.keys():
-        parquet.write_table(pa.table(tables[table_name]), outpath  / (table_name + ".parquet"))
 
     @property
     def metadata(self):
@@ -314,6 +326,8 @@ class Column():
     
     @property
     def date_form(self):
+      if pa.types.is_timestamp(self.c.type):
+        return self.c.cast(pa.date32())
       datelike_share = pc.mean(pc.match_substring_regex(self.c, "[0-9]{3,4}-[0-1]?[0-9]-[0-3]?[0-9]").cast(pa.int8()))
       if pc.greater(datelike_share, pa.scalar(.95)).as_py():
         return self.pl.str_parse_date(pl.datatypes.Date32, "%Y-%m-%d").to_arrow()
