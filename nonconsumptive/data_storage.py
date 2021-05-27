@@ -9,35 +9,49 @@ import uuid
 import numpy as np
 from numpy import packbits
 import logging
+logger = logging.getLogger("nonconsumptive")
+
 from typing import Callable, Iterator, Union, Optional, List
 from .prefs import prefs
 from .metadata import Metadata
 from .arrow_helpers import batch_id
-
+import nonconsumptive as nc
 SRP = None
 
 class Reservoir(object):
   __doc__ = """
-
   A store for holding, writing, and accessing tables on disk.
-
   """
-
   name = None
-
   def __init__(self,
     corpus,
-    cache = False,
+    cache:bool = False,
     dir:Union[None, str, Path] = None,
-    batch_size = 1024 * 1024 * 512
+    batch_size:int = 1024 * 1024 * 512,
+    uuid: Optional[str] = None,
+    number:int = 0
     ):
     """
 
     batch_size: number of bytes to write to each file before creating a new 
       one. Can be larger than memory.
 
+    uuid: One of three things.
+    1. A defined uuid to handle multithreading, parallelism, filenames, etc.
+    2. The special string "all" means the union of all IDs.
+    3. None, which means 
+
+    The file number within the register. New files will be created starting with this.
+
     """
+    if uuid is None:
+      self.uuid = str(uuid.uuid1())
+    else:
+      self.uuid = uuid
+    self.number= number
     self.corpus = corpus
+    if self.name is None:
+      raise NameError("There must be a name defined on each reservoir subclass")
     if dir is None:
       dir = corpus.root / self.name
     dir.mkdir(exist_ok = True)
@@ -46,13 +60,8 @@ class Reservoir(object):
     self.cache = cache
     self._id_map = None
 
-  def clean(self):
-    for p in self.path.glob(f"*.{self.format}"):
-      p.unlink()
-
   def empty(self):
     # Check if any items have been created.
-    print("PATH", self.path)
     for _ in self.path.glob(f"**/*.{self.format}"):
       return False
     return True
@@ -78,7 +87,7 @@ class Reservoir(object):
     if self.empty():
       if self.name in self.corpus.cache_set:
         print(f"Building {self.name}")
-        for b in self.build_cache():   
+        for b in self.build_cache():
           assert b.schema.metadata
           yield b
       else:
@@ -111,21 +120,35 @@ class Livestream(Reservoir):
 class ArrowReservoir(Reservoir):
   format = "ipc"
 
+  def __init__(self, *args, **kwargs):
+    self._writer = None
+    super().__init__(*args, **kwargs)
+
   def open_writer(self):
     # Until arrow supports metadata on record batches for ipc, not just 
     # tables (which I'm pretty sure it doesn't; https://issues.apache.org/jira/browse/ARROW-6940)
-    self.current_file_uuid = str(uuid.uuid1())
+    self.number += 1
+    self.current_file_uuid = f"{self.uuid}_{self.number}"
     self.bytes = 0
     self.batches = 0
-    print(r"\b")
     path = self.path / (self.current_file_uuid + ".ipc")
-    fout = pa.ipc.new_file(path, schema = pa.schema(self.arrow_schema), 
+    fout = pa.ipc.new_file(path, schema = pa.schema(self.schema), 
       options=pa.ipc.IpcWriteOptions(compression = "zstd"))
     return fout
 
-  def build_cache(self, chunk_size = 1024 * 1024 * 256, max_size = 5e08, max_files = 1e06):
+  @property
+  def writer(self):
+    if self._writer is None:
+      self._writer = self.open_writer()
+    return self_writer
+
+  @property
+  def schema(self):
+    return self.arrow_schema
+
+  def build_cache(self, chunk_size = 1024 * 1024 * 128, max_size = 5e08, max_files = 1e06):
     """
-    chunk_size: Max size of memory record batch, bytes. Default 256 MB.
+    chunk_size: Max size of memory record batch, bytes. Default 128 MB.
     max_size:  Max size of reservoir files, in bytes.
     max_files: Max documents in a single reservoir file.
     """
@@ -156,23 +179,18 @@ class ArrowReservoir(Reservoir):
     sink.close()
     self.flush_ids()
 
-class ArrowIDBatchReservoir(ArrowReservoir):
-  def open_writer(self):
-    self.ids = []
-    return super().open_writer()
+class ArrowTableReservoir(ArrowReservoir):
 
-  def flush(self):
-      pass
+  def __init__(self, *args, **kwargs):
+    self._writer = None
+    super().__init__(*args, **kwargs)
 
-  def build_cache(self, max_size = 5e08, max_files = 1e06):
+  def build_cache(self):
     """
-
     max_size:  Max size of reservoir files, in bytes.
     max_files: Max documents in a single reservoir file.
     """
-
-    print("Building cache")
-    sink = self.open_writer()
+    logger.info(f"Creating cache for {self.name} {self.uuid}")
     for batch in self._from_upstream():
       assert(batch.schema.metadata)
       yield batch
@@ -189,8 +207,11 @@ class ArrowIDBatchReservoir(ArrowReservoir):
     self.flush_ids()
 
   def flush_ids(self):
-    path = self.path / (self.current_file_uuid + ".json")
-    json.dump(self.ids, path.open("w"))
+    path = self.path / (self.current_file_uuid + ".index.feather")
+    tab = pa.table([
+      pa.array(self.ids),
+      pa.array(range(len(self.ids)))], names = ['@id', 'batch_no'])
+    feather.write_feather(tab, path)
     self.ids = []
 
   @property
@@ -235,10 +256,98 @@ class ArrowIDBatchReservoir(ArrowReservoir):
       fin = pa.ipc.open_file(file)
       # Must store metadata in json b/c not supported in IPC record batch writer
       # at the moment.
-      ids = json.load(file.with_suffix(".json").open())
+      ids = feather.read_table(file.with_suffix(".index.feather"), columns=["@id"])
+      ids = ids['@id']
       for i in range(fin.num_record_batches):
         batch = fin.get_batch(i)
-        batch = batch.replace_schema_metadata({"@id": ids[i]})
+        batch = batch.replace_schema_metadata({"@id": ids[i].as_py()})
+        assert batch.schema.metadata
+        yield batch
+
+class ArrowIDColReservoir(ArrowReservoir):
+
+  def open_writer(self):
+    return super().open_writer()
+
+  def build_cache(self, max_size = 5e08, max_files = 1e06):
+    """
+
+    max_size:  Max size of reservoir files, in bytes.
+    max_files: Max documents in a single reservoir file.
+    """
+
+    print("Building cache")
+    sink = self.open_writer()
+    for batch in self._from_upstream():
+      assert(batch.schema.metadata)
+      yield batch
+      self.ids.append(batch_id(batch))
+      sink.write_batch(batch)
+      self.batches += 1
+      self.bytes += batch.nbytes
+      if self.bytes > max_size or self.batches > max_files:
+        sink.close()
+        self.flush_ids()
+        sink = self.open_writer()
+        self.batches = 0
+    sink.close()
+    self.flush_ids()
+
+  def flush_ids(self):
+    path = self.path / (self.current_file_uuid + ".index.feather")
+    tab = pa.table([
+      pa.array(self.ids),
+      pa.array(range(len(self.ids)))], names = ['@id', 'batch_no'])
+    feather.write_feather(tab, path)
+    self.ids = []
+
+  @property
+  def id_location_map(self):
+    if self.empty():
+      return None
+    dest = Path(self.path / "id_location_lookup.parquet")
+    if dest.exists():
+      dest.unlink()
+    files = []
+    ids = []
+    batch_numbers = []
+    for file in self.path.glob("*.json"):
+      ids_here = json.load(file.open())
+      ids.extend(ids_here)
+      batch_numbers.extend(range(len(ids_here)))
+      fname = file.with_suffix("").name
+      files.extend([fname] * len(ids_here))
+    tab = pa.table(
+      {
+        'file': files,
+        '@id': ids,
+        'batch': batch_numbers
+      })
+    tab = tab.take(pc.sort_indices(tab['@id']))
+    parquet.write_table(tab, dest)
+    return dest
+
+  def get_id(self, id) -> pa.RecordBatch: 
+    if self.empty():
+      for r in self.build_cache():
+        pass
+    rows = parquet.read_table(self.id_location_map, filters = [(('@id', '==', id))])
+    dicto = rows.to_pydict()
+    file = dicto['file'][0] + self.format
+    batch = dicto['batch'][0]
+    with ipc.open_file(self.path / file) as f:
+      return f.get_batch(batch)
+
+  def iter_cache(self) -> Iterator[pa.RecordBatch]:
+    for file in self.path.glob("*.ipc"):
+      fin = pa.ipc.open_file(file)
+      # Must store metadata in json b/c not supported in IPC record batch writer
+      # at the moment.
+      ids = feather.read_table(file.with_suffix(".index.feather"), columns=["@id"])
+      ids = ids['@id']
+      for i in range(fin.num_record_batches):
+        batch = fin.get_batch(i)
+        batch = batch.replace_schema_metadata({"@id": ids[i].as_py()})
         assert batch.schema.metadata
         yield batch
 

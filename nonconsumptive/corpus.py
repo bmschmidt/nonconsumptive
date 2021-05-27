@@ -5,7 +5,6 @@ from pyarrow import parquet, feather
 from pyarrow import compute as pc
 import json
 import numpy as np
-import logging
 from bounter import bounter
 from collections import defaultdict
 from typing import DefaultDict, Iterator, Union, Optional, List
@@ -13,18 +12,20 @@ import polars as pl
 
 from .prefs import prefs
 from .metadata import Metadata
-from .data_storage import ArrowReservoir, ArrowIDBatchReservoir
+from .data_storage import ArrowIDBatchReservoir
 from .inputs import FolderInput, SingleFileInput, MetadataInput
 from .arrow_helpers import batch_id
-# Custom type hints
-
 _Path = Union[str, Path]
 
+import logging
+logger = logging.getLogger("nonconsumptive")
 
 class Corpus():
+
   def __init__(self, dir, texts = None, 
-                     metadata = None, cache_set = None, 
-                     text_options = {"format": None, "compression": None}):
+               metadata = None, cache_set = None, 
+               text_options = {"format": None, "compression": None, "text_field": None}):
+
     """Create a corpus
 
     Arguments:
@@ -173,12 +174,12 @@ class Corpus():
     p1 = self.full_text_path / (id + ".txt.gz")
     if p1.exists():
       return p1
-    logging.error(FileNotFoundError("HMM"))
-    
+    logger.error(FileNotFoundError("HMM"))
+  
   @property
   def documents(self):
     if self.metadata and self.metadata.tb:        
-      for id in self.metadata.tb[self.metadata.id_field]:
+      for id in self.metadata.tb["@id"]:
         yield Document(self, str(id))
 
   def get_document(self, id):
@@ -188,9 +189,9 @@ class Corpus():
   def total_wordcounts(self, max_bytes:int=100_000_000) -> pa.Table:
     cache_loc = self.root / "wordids.parquet"
     if cache_loc.exists():
-      logging.debug("Loading word counts from cache")
+      logger.debug("Loading word counts from cache")
       return parquet.read_table(cache_loc)
-    logging.info("Building word counts")
+    logger.info("Building word counts")
     counter = bounter(2048)
     for token, count in self.token_counts:
       dicto = dict(zip(token.to_pylist(), count.to_pylist()))
@@ -256,36 +257,6 @@ class Corpus():
     q = wordids.join(remainder, left_on=["token"], right_on=["token"], how="inner", )
     for b in q.to_arrow().select(["bookid", "wordid", "count"]).to_batches():
         yield b
-
-  def document_wordcounts(self, key = "@id") -> pa.Table:
-    """
-    Tokencounts for each document.
-
-    key: either @id (the native id in the schema) or "bookid" 
-    (the generated integer id.)
-    """
-    ids, counts = [], []
-    if key == 'bookid':
-      lookup = self.metadata.id_to_int_lookup
-    for batch in self.token_counts:
-        id = batch_id(batch)
-        if key == 'bookid':
-          try:
-            id = lookup[id]
-          except KeyError:
-            logging.warning(f"Missing bookid for {id}")
-            continue
-        count = pc.sum(batch['count']).as_py()
-        ids.append(id)
-        counts.append(count)
-    if key == 'bookid':
-      idtype = pa.uint32()
-    else:
-      idtype = pa.string()
-    ids = pa.array(ids, idtype)
-    counts = pa.array(counts, pa.uint32())
-    return pa.table([ids, counts],
-        names = [key, 'nwords'])
       
   def write_feature_counts(self,
     single_files:bool = True,
@@ -333,7 +304,7 @@ class Corpus():
   def random(self) -> Document:
     import random
     i = random.randint(0, len(self.metadata.tb) - 1)
-    id = self.metadata.tb.column(self.metadata.id_field)[i].as_py()
+    id = self.metadata.tb.column("@id")[i].as_py()
     return Document(self, id)
 
 class Tokenization(ArrowIDBatchReservoir):
@@ -357,10 +328,37 @@ class TokenCounts(ArrowIDBatchReservoir):
     'count': pa.uint32()
   })
 
+  def __init__(self, *args, **kwargs):
+    self.ids_two = []
+    self.doc_lengths = []
+    super().__init__(*args, **kwargs)
+
+  def flush_wordcounts(self, uuid):
+    parent = self.corpus.root / "document_lengths"
+    parent.mkdir(exist_ok = True)
+    path = (parent / uuid).with_suffix(".feather")
+    tab = pa.table(
+      {"id": pa.array(self.ids_two, pa.string()),
+      "count": pa.array(self.doc_lengths, pa.uint32())}
+    )
+    feather.write_feather(tab, path)
+    self.ids_two = []
+    self.doc_lengths = []
+
   def _from_upstream(self) -> Iterator[pa.RecordBatch]:
+    current_uuid = None
     for batch in self.corpus.tokenization:
       id = batch_id(batch)
-      yield token_counts(batch['token'], id)
+      counts = token_counts(batch['token'], id)
+      if self.current_file_uuid != current_uuid and current_uuid is not None:
+        self.flush_wordcounts(current_uuid)
+        current_uuid = self.current_file_uuid
+      total_wordcount = pc.sum(counts['count']).as_py()
+      self.ids_two.append(id)
+      self.doc_lengths.append(total_wordcount)
+      yield counts
+
+    self.flush_wordcounts(self.current_file_uuid)
 
 class Ngrams(ArrowIDBatchReservoir):
   def __init__(self, ngrams: int, corpus: Corpus, end_chars: List[str] = [], beginning_chars: List[str] = [], **kwargs):
@@ -408,7 +406,11 @@ class Ngrams(ArrowIDBatchReservoir):
           else:
               cols[f"token{n+1}"] = tokens[n:-(zengrams-n)]
       ngram_tab = pa.table(cols)
-
+      if len(ngram_tab) < ngrams:
+        empty = [[]]
+        # Still register that we saw the id even if it's not long enough for ngrams
+        yield pa.RecordBatch.from_arrays(empty * len(self.arrow_schema.names), schema=self.arrow_schema.with_metadata({'@id': batch_id(batch)}))
+        continue
       # Temporarily pass through pandas because https://github.com/pola-rs/polars/issues/668
       t = pl.from_pandas(ngram_tab.to_pandas())
       counts = t.groupby([f"token{i+1}" for i in range(ngrams)])\

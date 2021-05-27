@@ -8,6 +8,8 @@ import uuid
 import argparse
 import random
 from typing import List, Set, Dict, Tuple, Optional, Iterator, Union
+import logging
+logger = logging.getLogger("nonconsumptive")
 
 
 
@@ -117,120 +119,6 @@ def args_ducksauce():
     assert output.suffix in {".feather", ".parquet"}
     from_file(**parse_args())
 
-def sort(iterator, keys, tmp_dir, output, block_size = 2_500_000_000):
-    old_files = []
-    n_records = 0
-    # First pass--simply write to disk.
-    cache_size = 0
-    total_bytes = 0
-    cache = []
-    key = keys[0]
-    for i, batch in enumerate(iterator):
-        n_records += len(batch)
-        cache_size += batch.nbytes
-        total_bytes += batch.nbytes
-        cache.append(batch)        
-        if cache_size > block_size:
-            block = pa.Table.from_batches(cache)
-            array = partition(block, key, 3)
-            for subbatch in array:
-                m = pc.min_max(subbatch[key]).as_py()
-                path = Path(tmp_dir / (str(uuid.uuid1()) + ".feather"))
-                feather.write_feather(subbatch, path)
-                old_files.append((m['min'], m['max'], len(subbatch), path))
-            cache = []
-            cache_size = 0
-
-    if len(cache) > 0:
-        block = pa.Table.from_batches(cache)
-        array = partition(block, key, 3)
-        for subbatch in array:
-            m = pc.min_max(sortkey(subbatch, key)).as_py()
-            path = Path(tmp_dir / (str(uuid.uuid1()) + ".feather"))
-            feather.write_feather(subbatch, path)
-            old_files.append((m['min'], m['max'], len(subbatch), path))
-
-    assert(n_records == sum([f[2] for f in old_files]))
-    
-    old_files.sort()
-
-    n_splits = 3
-    print(f"Proceeding to split {total_bytes / 1024 / 1024:.1f}MB into {2**n_splits} chunks per {block_size / 1024 / 1024:.2f}MB block, {total_bytes // block_size} total chunks.")
-    
-    iter_num = 0
-    while not is_ordered(old_files, block_size):
-        iter_num += 1
-        # If it's not sorted, break each of the current chunks into 
-        cache_size = 0
-        cache = []
-        new_files = []
-        for i, (min, max, size, path) in enumerate(old_files):
-            t = feather.read_table(path)
-            path.unlink()
-            cache_size += t.nbytes
-            cache.append(t)
-            if i == (len(old_files) - 1) or cache_size >= block_size or (cache_size >= block_size // 2 and iter_num % 2 == 1) :
-                tab = pa.concat_tables(cache).combine_chunks()
-                array = partition(tab, key, n_splits)
-                for subbatch in array:
-                    m = pc.min_max(sortkey(subbatch, key)).as_py()
-                    path = Path(tmp_dir / (str(uuid.uuid1()) + ".feather"))
-                    feather.write_feather(subbatch, path)
-                    new_files.append((m['min'], m['max'], len(subbatch), path))       
-                cache_size = 0
-                cache = []
-        old_files = new_files
-        old_files.sort()
-        assert(n_records == sum([f[2] for f in old_files]))    
-        overlaps = 0
-        for (mina, maxa, e, f), (minb, maxb, c, d) in zip(old_files[:-1], old_files[1:]):
-            overlaps += (maxa - minb) / (maxa - mina)
-        overlaps  = overlaps / (len(old_files) - 1)
-        print(f"average overlap of adjacent batches is {overlaps:.3%}")
-
-    cache_size = 0
-    cache = []
-    out_num = 0
-    written = 0
-    print("Writing final data.")
-    final_outfile = None
-    for i, (min, max, size, path) in enumerate(old_files):
-        t = feather.read_table(path)
-        path.unlink()
-        cache_size += t.nbytes
-        cache.append(t)
-        
-        try:
-            next_min = old_files[i + 1][0]
-        except IndexError:
-            # Max 32-byte float. will need adjustment if ever want to do this on 64 bits.
-            next_min = int(0x7FFFFFFFFFFFFFFF)
-        if cache_size >= block_size or next_min == int(0x7FFFFFFFFFFFFFFF):
-            if final_outfile is None:
-                if output.suffix == ".feather":
-                    final_outfile = ipc.new_file(output, schema = cache[0].schema)
-                if output.suffix == ".parquet":
-                    final_outfile = parquet.ParquetWriter(output, schema=cache[0].schema)
-            tab = pa.concat_tables(cache)
-            sort_order = pc.sort_indices(sort_keys = keys)
-            tab = tab.take(sort_order)
-            out_num += 1
-            mask = pc.less(tab[key], pa.scalar(next_min, pa.int64()))
-            done = tab.filter(mask)
-            if output.suffix == ".feather":
-                for record_batch in done.to_batches():
-                    final_outfile.write_batch(record_batch)
-            elif output.suffix == ".parquet":
-                final_outfile.write_table(done)
-            written += done.nbytes
-            leftover = tab.filter(pc.invert(mask))
-
-            # The cache are values that might be part of the next item.
-            cache = [leftover]
-            cache_size = leftover.nbytes
-    # No need for a final flush
-    final_outfile.close()
-
 class MyTable():
     def __init__(self, table, dir, key):
         self.path = Path(dir) / (str(uuid.uuid1()) + ".feather")
@@ -281,7 +169,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
     key = keys[0]
     n_written = 0
     with TemporaryDirectory() as tmp_dir:
-        print("Reading input")
+        logger.debug("Reading initial stream for sort.")
         for i, batch in enumerate(iterator):
             n_records += len(batch)
             cache_size += batch.nbytes
@@ -306,7 +194,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
         assert(n_records == sum([f.length for f in tables]))
         
         n_splits = 3
-        print("Preparing for shuffle sort.")
+        logger.debug("Preparing shuffle sort.")
         while True:
             tables.sort(key = lambda x: x.minmax['min'])
             malordered = malordered_ranges(tables, block_size)
@@ -335,7 +223,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
         cache = []
         out_num = 0
         written = 0
-        print("Writing final data.")
+        print("\nFinishing sort.")
         final_outfile = None
         for i, tab in enumerate(tables):
             cache.append(tab.table)
@@ -371,6 +259,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
                 cache_size = leftover.nbytes
         # No need for a final flush
         final_outfile.close()
+        logger.debug("Sort done.")
 
 
 def malordered_ranges(files, batch_size):

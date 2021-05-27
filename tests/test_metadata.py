@@ -88,5 +88,3 @@ class TestCatalog():
     nc = cat.nc_catalog      
     assert pa.types.is_list(nc['keywords'].type)
     assert pa.types.is_integer(nc['year'].type)
-    assert pa.types.is_integer(nc['year'].type)    
-  

@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import gzip
 from .wordcounting import chunked_wordcounts, wordcounts
+import logging
+logger = logging.getLogger("nonconsumptive")
 
 class BaseDocument(object):
   """
@@ -66,7 +68,7 @@ class Document(BaseDocument):
     return str(self)
 
   def __str__(self):
-    return "<DOCUMENT> " +  json.dumps(self.metadata)
+    return f"<nonconsumptive document {self.metadata['@id']}> \n " +  json.dumps(self.metadata, default=str)
 
   @property
   def metadata(self):
@@ -86,7 +88,7 @@ class Document(BaseDocument):
     schema = pa.schema(
       {"token": pa.utf8(),
       "count": pa.uint32()},
-      metadata={'nc_metadata': json.dumps(self.metadata)})
+      metadata={'nc_metadata': json.dumps(self.metadata, default=str)})
     )
 
 def tokenize(string) -> pa.Array:

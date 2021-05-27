@@ -4,19 +4,22 @@ import pyarrow as pa
 from pyarrow import compute as pc
 from pyarrow import json as pa_json
 from pyarrow import csv as pa_csv
-from pyarrow import parquet, feather
+from pyarrow import parquet, feather, ipc
 from pathlib import Path
 import numpy as np
 from .inputs import FolderInput
 import tempfile
-import logging
 import gzip
 from pyarrow import types
 from collections import defaultdict
 import polars as pl
 from typing import DefaultDict, Iterator, Union, Optional, List
 import nonconsumptive as nc
+
 tmpdir = tempfile.TemporaryDirectory
+
+import logging
+logger = logging.getLogger("nonconsumptive")
 
 nc_schema_version = 0.1
 
@@ -34,18 +37,36 @@ def cat_from_filenames(corpus) -> Metadata:
 class Metadata(object):
   def __init__(self, corpus: nc.Corpus, raw_file: Optional[Union[str, Path]]):
     self.corpus = corpus
-    if raw_file is None and not Path(self.nc_metadata_path).exists():
+    if self.nc_metadata_path.exists():
+      if raw_file is not None:
+        if self.nc_metadata_path.stat().st_mtime < Path(raw_file).stat().st_mtime:
+          logger.info("Deleting out-of-date NC catalog.")
+          self.nc_metadata_path.exists.unlink()
+        else:
+          logger.info("Loading @id field from on-disk catalog.")
+          self.load_processed_catalog(["@id"])
+          return
+      else:
+        logger.info("Loading @id field from on-disk catalog.")
+        self.load_processed_catalog(["@id"])
+        return
+    if raw_file is None:
       # When no metadata is passed, create minimal metadata from the 
       # filenames on disk.
+      logger.info("Creating catalog from filenames")
       basic_ids = cat_from_filenames(corpus)
-      self.catalog = Catalog(None, self.nc_metadata_path, table = basic_ids)
+      catalog = Catalog(None, self.nc_metadata_path, table = basic_ids)
     else:
-      self.catalog = Catalog(raw_file, self.nc_metadata_path)
-    self.tb = self.catalog.nc_catalog
-    feather.write_feather(self.tb, self.nc_metadata_path)
-
+      logger.info(f"Creating catalog from {raw_file}.")
+      catalog = Catalog(raw_file, self.nc_metadata_path)
+    logger.info(f"Saving metadata ({len(catalog.nc_catalog)} rows)")
+    feather.write_feather(catalog.nc_catalog, self.nc_metadata_path)
+    self.load_processed_catalog()
   def __iter__(self):
     pass
+
+  def load_processed_catalog(self, columns = ["@id"]):
+    self.tb = feather.read_table(self.nc_metadata_path, columns = columns)
   
   @property
   def nc_metadata_path(self):
@@ -60,7 +81,9 @@ class Metadata(object):
     path.mkdir(exist_ok=True)
     dest = path / "textids.feather"
     if dest.exists():
+      logger.debug("Reading textids from cache")
       return feather.read_table(dest)
+    logger.debug("Creating textids")
 
     ints = np.arange(len(self.tb["@id"]), dtype = np.uint32)
     tb = pa.table([
@@ -80,7 +103,7 @@ class Metadata(object):
     return dicto
 
   def get(self, id) -> dict:
-    matching = pc.filter(self.catalog, pc.equal(self.catalog["@id"], pa.scalar(id)))
+    matching = pc.filter(self.tb, pc.equal(self.tb["@id"], pa.scalar(id)))
     try:
       assert(matching.shape[0] == 1)
     except:
@@ -89,37 +112,64 @@ class Metadata(object):
     return {k:v[0] for k, v in matching.to_pydict().items()}
 
   def to_flat_catalog(self) -> None:
+
     """
     Writes flat parquet files suitable for duckdb ingest or other use
     in a traditional relational db setting, including integer IDs.
-    """
-    rich = self.tb
-    outpath = self.corpus.root / "metadata" / "flat_catalog"
-    outpath.mkdir(exist_ok = True)
-    tables = defaultdict(dict)
-    textids = self.text_ids
-    tables['fastcat']['bookid'] = \
-      textids['bookid'].take(pc.index_in(textids['@id'], value_set=rich['@id']))
-    tables['catalog']['bookid'] = \
-      tables['fastcat']['bookid']
-    for name, col in zip(rich.column_names, rich.columns):
-      if pa.types.is_string(col.type):
-        tables['catalog'][name] = col
-      elif pa.types.is_integer(col.type):
-        tables['catalog'][name] = col
-        tables['fastcat'][name] = col
-      elif pa.types.is_dictionary(col.type):
-        tables[name + "Lookup"][f'{name}__id'] = pa.array(np.arange(len(col.chunks[-1].dictionary)), col.type.index_type)
-        tables[name + "Lookup"][f'{name}'] = col.chunks[-1].dictionary
-        tables['fastcat'][f'{name}__id'] = pa.chunked_array([chunk.indices for chunk in rich[name].chunks])          
-        tables['catalog'][name] = col # <- Only works b/c parquet has no dict type.
-      elif pa.types.is_list(col.type):
-        print("Skipping list ", name)
-      else:
-        print("WHAT IS ", name)
-    for table_name in tables.keys():
-      parquet.write_table(pa.table(tables[table_name]), outpath  / (table_name + ".parquet"))
 
+    Just does it in one giant go; could do it by batches for performance/memory handling, but we don't.
+    """
+    logger.info("Writing flat catalog")
+    outpath = self.corpus.root / "metadata" / "flat_catalog"
+    outpath.mkdir(exist_ok = True, parents = True)
+
+    logger.info("Reading full catalog")
+
+    tab = ipc.open_file(self.nc_metadata_path)
+    logger.debug(f"read file with schema {tab.schema.names}")
+    textids = self.id_to_int_lookup
+
+    writers = dict()
+    written_meta = 0
+    for i in range(tab.num_record_batches):
+      batch = tab.get_batch(i)
+      written_meta += len(batch)
+      logging.debug(f"ingesting metadata batch {i}, {written_meta} items written total.")
+      dict_tables = set()
+
+      tables = defaultdict(dict)
+      tables['fastcat']['bookid'] = pa.array([textids[id.as_py()] for id in batch['@id']])
+      tables['catalog']['bookid'] = tables['fastcat']['bookid']
+      for name, col in zip(batch.schema.names, batch.columns):
+        if pa.types.is_string(col.type):
+          tables['catalog'][name] = col
+        elif pa.types.is_integer(col.type) or pa.types.is_date(col.type):
+          tables['catalog'][name] = col
+          tables['fastcat'][name] = col
+        elif pa.types.is_dictionary(col.type):
+          dict_tables.add(name)
+          tables['fastcat'][f'{name}__id'] = col.indices   
+          tables['catalog'][name] = col.dictionary.take(col.indices)
+        elif pa.types.is_list(col.type):
+          logger.warning("Skipping list ", name)
+        else:
+          logger.error("WHAT IS ", name)
+          raise
+      for table_name in tables.keys():
+        loc_batch = pa.table(tables[table_name])
+        if not table_name in writers:
+          writers[table_name] = parquet.ParquetWriter(outpath  / (table_name + ".parquet"), loc_batch.schema)
+        writers[table_name].write_table(loc_batch)
+    for name in dict_tables:
+      # Use the last batch for dictionaries
+      col = batch[name]
+      table_name = name + "Lookup"
+      tab = pa.table(
+        [pa.array(np.arange(len(col.dictionary)), col.type.index_type),
+        col.dictionary],
+        names=[f"{name}__id", name]
+      )
+      parquet.write_table(tab, outpath  / (table_name + ".parquet"))
 
 def id_field(tb: pa.Table) -> str:
   """
@@ -259,6 +309,7 @@ class Catalog():
       return {
         'version': nc.__version__
       }
+    
     @property
     def nc_catalog(self):
       if self.tb:

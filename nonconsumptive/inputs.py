@@ -3,7 +3,10 @@ from .document import Document
 from typing import Callable, Iterator, Union, Optional, List, Tuple
 import logging
 import gzip
-from pyarrow import feather
+from pyarrow import feather, ipc
+from .corpus import Corpus
+
+logger = logging.getLogger("nonconsumptive")
 
 class SingleFileInput():
   __doc__ = """
@@ -13,7 +16,7 @@ class SingleFileInput():
 
   """
   def __init__(self,
-    corpus,
+    corpus: Corpus,
     compression: Optional[str] = None,
     dir:Path = Path("input.txt"),
     format: str = "txt"):
@@ -36,8 +39,8 @@ class SingleFileInput():
       except ValueError:
         errored.append(line)
     if len(errored):
-      logging.warning(f"{len(errored)} unprintable lines, including:\n")
-      logging.warning(*errored[:5])
+      logger.warning(f"{len(errored)} unprintable lines, including:\n")
+      logger.warning(*errored[:5])
 
 class FolderInput():
   __doc__ = """
@@ -47,7 +50,7 @@ class FolderInput():
   Ids are taken from filenames with ".txt.gz" removed.
   """
   def __init__(self,
-    corpus,
+    corpus: Corpus,
     compression: Optional[str] = None,
     format: str = "txt"):
     self.format = format
@@ -56,16 +59,12 @@ class FolderInput():
     self.dir = corpus.full_text_path
 
   def documents(self) -> Iterator[Document]:
-    print("\n\nDOCUMENTS\n\n")
     if self.compression is None:
       glob = f"**/*.{self.format}"
     else:
       glob = f"**/*.{self.format}.{self.compression}"
     assert(self.dir.exists())
-    print(f"\n\n{self.compression}\n\n")
     for f in self.dir.glob(glob):
-      print(f"\n\{f}\n\n")
-
       yield Document(self.corpus, path = f)
 
   def __iter__(self) -> Iterator[Tuple[str, str]]:
@@ -83,13 +82,15 @@ class MetadataInput():
   feather *once* and then extract text and ids from the metadata column.
   """
   def __init__(self,
-    corpus):
+    corpus: Corpus):
     self.corpus = corpus
-    self.text_key = corpus.full_text_path
+    self.text_field = corpus.text_field
 
   def __iter__(self) -> Iterator[Tuple[str, str]]:
     fin = self.corpus.metadata.nc_metadata_path
-    feather.read_table(fin, columns = ['@id', self.text_key])
-    for chunk in feather.chunks:
-      for id, text in zip(chunk['@id'], chunk[self.text_key]):
-        yield id.to_py(), text.to_py()
+    table = feather.read_table(fin, columns = ['@id', self.text_field])
+    table = ipc.open_file(corpus.root / "nonconsumptive_catalog.feather")
+    for i in range(table.num_record_batches):
+      batch = table.get_batch(i)
+      for id, text in zip(batch['@id'], batch[self.text_field]):
+        yield id.as_py(), text.as_py()

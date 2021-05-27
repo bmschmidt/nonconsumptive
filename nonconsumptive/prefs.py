@@ -1,4 +1,6 @@
 import yaml
+import logging
+logger = logging.getLogger("nonconsumptive")
 
 default = """
 paths:
