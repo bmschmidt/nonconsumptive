@@ -149,18 +149,17 @@ class Metadata(object):
 
     tab = ipc.open_file(self.nc_metadata_path)
     logger.debug(f"read file with schema {tab.schema.names}")
-    textids = self.id_to_int_lookup
 
     writers = dict()
     written_meta = 0
+
     for i in range(tab.num_record_batches):
       batch = tab.get_batch(i)
-      written_meta += len(batch)
       logging.debug(f"ingesting metadata batch {i}, {written_meta} items written total.")
       dict_tables = set()
 
       tables = defaultdict(dict)
-      tables['fastcat']['bookid'] = pa.array([textids[id.as_py()] for id in batch['@id']])
+      tables['fastcat']['bookid'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
       tables['catalog']['bookid'] = tables['fastcat']['bookid']
       for name, col in zip(batch.schema.names, batch.columns):
         if pa.types.is_string(col.type):
@@ -182,6 +181,8 @@ class Metadata(object):
         if not table_name in writers:
           writers[table_name] = parquet.ParquetWriter(outpath  / (table_name + ".parquet"), loc_batch.schema)
         writers[table_name].write_table(loc_batch)
+      written_meta += len(batch)
+
     for name in dict_tables:
       # Use the last batch for dictionaries
       col = batch[name]

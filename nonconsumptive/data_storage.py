@@ -238,6 +238,7 @@ class ArrowReservoir(Reservoir):
         self.flush_cache()
       yield batch
     self.flush_cache()
+    self.writer.close()
   
   def iter_cache(self) -> Iterator[pa.RecordBatch]:
     if self.uuid is None:
@@ -246,6 +247,7 @@ class ArrowReservoir(Reservoir):
       # Just the one file
       fs = [self.path / (self.uuid + ".ipc")]
     for file in fs:
+      logging.warning(file)
       fin = pa.ipc.open_file(file)
       for i in range(fin.num_record_batches):
         batch = fin.get_batch(i)

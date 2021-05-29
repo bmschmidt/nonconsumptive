@@ -49,10 +49,9 @@ class SingleFileInput(TextInput):
         format: str = "txt"):
 
     self.format = format
-    self.corpus = corpus
     self.compression = compression
     self.dir = dir
-    super().__init__()
+    super().__init__(corpus)
 
 
   def __iter__(self) -> Iterator[Tuple[str, str]]:

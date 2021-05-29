@@ -90,9 +90,11 @@ class EncodedCounts(ArrowReservoir):
       self.cache.append(batch)
       cache_size += batch.nbytes
       if cache_size > 5_000_000:
-        yield self.flush(wordids)
+        for batch in self.flush(wordids).to_batches():
+          yield batch
         cache_size = 0
-    yield self.flush(wordids)
+    for batch in self.flush(wordids).to_batches():
+      yield batch
 
 class EncodedUnigrams(EncodedCounts):
   name = "ncid_wordid"
