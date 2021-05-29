@@ -37,18 +37,19 @@ def cat_from_filenames(corpus) -> Metadata:
 class Metadata(object):
   def __init__(self, corpus: nc.Corpus, raw_file: Optional[Union[str, Path]]):
     self.corpus = corpus
+    self._tb = None
     if self.nc_metadata_path.exists():
       if raw_file is not None:
         if self.nc_metadata_path.stat().st_mtime < Path(raw_file).stat().st_mtime:
           logger.info("Deleting out-of-date NC catalog.")
           self.nc_metadata_path.exists.unlink()
         else:
-          logger.info("Loading @id field from on-disk catalog.")
-          self.load_processed_catalog(["@id"])
+#          logger.info("Loading @id field from on-disk catalog.")
+#          self.load_processed_catalog(["@id"])
           return
       else:
-        logger.info("Loading @id field from on-disk catalog.")
-        self.load_processed_catalog(["@id"])
+#        logger.info("Loading @id field from on-disk catalog.")
+#        self.load_processed_catalog(["@id"])
         return
     if raw_file is None:
       # When no metadata is passed, create minimal metadata from the 
@@ -59,24 +60,45 @@ class Metadata(object):
     else:
       logger.info(f"Creating catalog from {raw_file}.")
       catalog = Catalog(raw_file, self.nc_metadata_path)
+    self._ids = None
     logger.info(f"Saving metadata ({len(catalog.nc_catalog)} rows)")
     feather.write_feather(catalog.nc_catalog, self.nc_metadata_path)
+#    self.load_processed_catalog()
+  
+  @property
+  def ids(self) -> pa.Array:
+    """
+    An array of the string ids for each column in the dataset.
+    """
+    if self._ids is not None:
+      return self._ids
+
+    self._ids = self.tb['@id']
+    return self._ids
+
+  @property
+  def tb(self):
+    if self._tb is not None:
+      return self._tb
+    logger.warning("Expensively creating table")
     self.load_processed_catalog()
+    return self._tb
   def __iter__(self):
     pass
 
   def load_processed_catalog(self, columns = ["@id"]):
-    self.tb = feather.read_table(self.nc_metadata_path, columns = columns)
+    self._tb = feather.read_table(self.nc_metadata_path, columns = columns)
   
   @property
   def nc_metadata_path(self):
     return Path(self.corpus.root / "nonconsumptive_catalog.feather")
 
+  """
   @property
   def text_ids(self) -> pa.Table:
-    """
+    ""
     Create -- or save -- a folder of textid integer lookups.
-    """
+    ""
     path = Path(self.corpus.root / "metadata")
     path.mkdir(exist_ok=True)
     dest = path / "textids.feather"
@@ -95,12 +117,12 @@ class Metadata(object):
       ])  
     pa.feather.write_feather(tb, dest)
     return tb
-
   @property
   def id_to_int_lookup(self):
     ids = self.text_ids
     dicto = dict(zip(ids["@id"].to_pylist(), ids['bookid'].to_pylist()))
     return dicto
+  """
 
   def get(self, id) -> dict:
     matching = pc.filter(self.tb, pc.equal(self.tb["@id"], pa.scalar(id)))

@@ -29,9 +29,8 @@ class TestVolume():
         ids = []
         texts = []
         for batch in simple_corpus.tokenization:
-            ids.append(batch.schema.metadata.get(b'@id').decode("utf-8"))
+            print(batch)
             texts.append(batch['token'].to_pylist())
-        assert len(ids) == 3
         assert sum(map(len, texts)) == 42
 
     def test_wordcount_iteration(self, simple_corpus):
@@ -39,10 +38,8 @@ class TestVolume():
         words = []
         counts = 0
         for batch in simple_corpus.token_counts:
-            ids.append(batch.schema.metadata.get(b'@id').decode("utf-8"))
             counts += sum(batch['count'].to_pylist())
             words = words + batch['token'].to_pylist()
-        assert len(ids) == 3
         assert "wife" in words
         assert "каждая" in words
         assert counts == 42
@@ -56,7 +53,7 @@ class TestVolume():
 
     def test_bookids(self, simple_corpus):
         meta = simple_corpus.metadata
-        lookup = meta.id_to_int_lookup
+        lookup = meta.ids.to_pylist()
         for letter in "abг":
             assert letter in lookup
 

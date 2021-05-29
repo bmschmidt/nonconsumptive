@@ -4,26 +4,55 @@ from typing import Callable, Iterator, Union, Optional, List, Tuple
 import logging
 import gzip
 from pyarrow import feather, ipc
-from .corpus import Corpus
-
+import uuid
+from .data_storage import Node, BatchIDIndex
 logger = logging.getLogger("nonconsumptive")
 
-class SingleFileInput():
+class TextInput(Node):
+  """
+  An object that defines a method for iterating across documents
+  linked to IDs.
+
+  There's one really important rule here:
+  IT MUST BE IN A STABLE ORDER ACROSS MULTIPLE RUNS WITH THE SAME UUID!
+  AND I DON'T KNOW HOW TO ENFORCE THIS!
+  """
+  def __init__(self, corpus):
+    super().__init__(corpus)
+
+  def _iter_documents(self):
+    raise NotImplementedError("No documents method defined.")
+
+  def __iter__(self) -> Iterator[Tuple[str, str]]:
+    """
+    The texts iterate over the documents in order
+    and stash the ids somewhere.
+    """
+    with BatchIDIndex(self.corpus) as batch_ids:
+      create_ids = not batch_ids.exists()
+      for id, text in self._iter_documents():
+        if create_ids:
+          batch_ids.push(id)
+        yield text, id
+
+class SingleFileInput(TextInput):
   __doc__ = """
 
   One text per line (no returns in any document).
-  Id separated from the rest of the doucment by a tab.
+  id field separated from the rest of the doucment by a tab. (no tabs allowed in id.)
 
   """
   def __init__(self,
-    corpus: Corpus,
-    compression: Optional[str] = None,
-    dir:Path = Path("input.txt"),
-    format: str = "txt"):
+        corpus: 'Corpus',
+        compression: Optional[str] = None,
+        dir:Path = Path("input.txt"),
+        format: str = "txt"):
+
     self.format = format
     self.corpus = corpus
     self.compression = compression
     self.dir = dir
+    super().__init__()
 
 
   def __iter__(self) -> Iterator[Tuple[str, str]]:
@@ -31,7 +60,6 @@ class SingleFileInput():
     opener: function = open
     if self.compression == "gz":
       opener = lambda x: gzip.open(x, 'rt')
-    print(opener)
     for line in opener(self.corpus.full_text_path):
       try:
         id, text = line.split("\t", 1)
@@ -42,7 +70,7 @@ class SingleFileInput():
       logger.warning(f"{len(errored)} unprintable lines, including:\n")
       logger.warning(*errored[:5])
 
-class FolderInput():
+class FolderInput(TextInput):
   __doc__ = """
   Store files in folders, with optional compression.
   Can be nested at any depth.
@@ -50,13 +78,14 @@ class FolderInput():
   Ids are taken from filenames with ".txt.gz" removed.
   """
   def __init__(self,
-    corpus: Corpus,
-    compression: Optional[str] = None,
-    format: str = "txt"):
+        corpus: "Corpus",
+        compression: Optional[str] = None,
+        format: str = "txt"):
     self.format = format
     self.corpus = corpus
     self.compression = compression
     self.dir = corpus.full_text_path
+    super().__init__(corpus)
 
   def documents(self) -> Iterator[Document]:
     if self.compression is None:
@@ -71,9 +100,9 @@ class FolderInput():
     for doc in self.documents():
       id = doc.id
       yield id, doc.full_text
-      
 
-class MetadataInput():
+
+class MetadataInput(TextInput):
   __doc__ = """
   For cases when the full text is stored inside the 
   metadata itself--as in common in, for example, social media datasets.
@@ -82,9 +111,10 @@ class MetadataInput():
   feather *once* and then extract text and ids from the metadata column.
   """
   def __init__(self,
-    corpus: Corpus):
+      corpus: "Corpus"):
     self.corpus = corpus
     self.text_field = corpus.text_field
+    super().__init__()
 
   def __iter__(self) -> Iterator[Tuple[str, str]]:
     fin = self.corpus.metadata.nc_metadata_path

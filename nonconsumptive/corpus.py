@@ -1,22 +1,20 @@
 from pathlib import Path
 from .document import Document, tokenize, token_counts
 import pyarrow as pa
-from pyarrow import parquet, feather
+from pyarrow import parquet, feather, RecordBatch 
 from pyarrow import compute as pc
 import json
 import numpy as np
 from bounter import bounter
 from collections import defaultdict
-from typing import DefaultDict, Iterator, Union, Optional, List
+from typing import DefaultDict, Iterator, Union, Optional, List, Tuple
 import polars as pl
+from .data_storage import ArrowIDChunkedReservoir, ArrowReservoir, BatchIDIndex
 
 from .prefs import prefs
 from .metadata import Metadata
-from .data_storage import ArrowIDBatchReservoir
 from .inputs import FolderInput, SingleFileInput, MetadataInput
-from .arrow_helpers import batch_id
-_Path = Union[str, Path]
-
+from .transformations import transformations
 import logging
 logger = logging.getLogger("nonconsumptive")
 
@@ -24,7 +22,9 @@ class Corpus():
 
   def __init__(self, dir, texts = None, 
                metadata = None, cache_set = None, 
-               text_options = {"format": None, "compression": None, "text_field": None}):
+               text_options = {"format": None, "compression": None, "text_field": None},
+               total_batches: Optional[int] = None,
+               this_batch: int = 0):
 
     """Create a corpus
 
@@ -39,8 +39,16 @@ class Corpus():
                  defaults will be taken from .prefs().
     format    -- The text format used ('.txt', '.html', '.tei', '.md', etc.)
     compression -- Compression used on texts. Only '.gz' currently supported.
-
+    total_batches -- how many chunks to process the corpus in.
+    this_batch -- the batch number we're in right now. For multiprocessing, etc. zero-indexed.
     """
+    if total_batches is None:
+        self.uuid : str = "all"
+    else:
+      self.fraction = (this_batch, total_batches - 1)
+      assert self.fraction[0] <= self.fraction[1]
+      self.uuid : str = str(uuid.uuid1())
+    self.fraction = 0
     if texts is not None: 
       self.full_text_path = Path(texts)
     else:
@@ -68,14 +76,19 @@ class Corpus():
       self.text_field = text_options["text_field"]
     else:
       self.text_field = None
-
     self._texts = None
+    self.transformations = {}
 
   def setup_input_method(self, full_text_path, method):
     if method is not None:
       return method
     if full_text_path.is_dir():
       return
+
+  def batch_ids(self, uuid: str, id_type: str) -> Iterator[RecordBatch]:
+    assert id_type in ["_ncid", "@id"]
+    ids = BatchIDIndex(self, uuid)
+    return ids.iter_ids(id_type)
 
   @property
   def texts(self):
@@ -116,60 +129,6 @@ class Corpus():
     else:
       return {}
 
-  @property 
-  def bigrams(self):
-    """
-    returns a reservoir that iterates over tokenized 
-    arrow batches of documents as arrow arrays. 
-    """
-    tokenizer = Bigrams(self)
-    return tokenizer
-
-  @property 
-  def trigrams(self):
-    """
-    returns a reservoir that iterates over tokenized 
-    arrow batches of documents as arrow arrays. 
-    """
-    tokenizer = Trigrams(self)
-    return tokenizer
-
-  @property 
-  def quadgrams(self):
-    """
-    returns a reservoir that iterates over tokenized 
-    arrow batches of documents as arrow arrays. 
-    """
-    tokenizer = Quadgrams(self)
-    return tokenizer
-
-  @property 
-  def quintgrams(self):
-    """
-    returns a reservoir that iterates over tokenized 
-    arrow batches of documents as arrow arrays. 
-    """
-    tokenizer = Quintgrams(self)
-    return tokenizer
-
-  @property 
-  def tokenization(self):
-    """
-    returns a reservoir that iterates over tokenized 
-    arrow batches of documents as arrow arrays. 
-    """
-    tokenizer = Tokenization(self)
-    return tokenizer
-
-  @property
-  def token_counts(self):
-    """
-    Returns a reservoir that iterates over grouped
-    counts of tokens.
-    """
-    token_counts = TokenCounts(self)
-    return token_counts
-
   def path_to(self, id):
     p1 = self.full_text_path / (id + ".txt.gz")
     if p1.exists():
@@ -192,7 +151,7 @@ class Corpus():
       logger.debug("Loading word counts from cache")
       return parquet.read_table(cache_loc)
     logger.info("Building word counts")
-    counter = bounter(2048)
+    counter = bounter(4096)
     for token, count in self.token_counts:
       dicto = dict(zip(token.to_pylist(), count.to_pylist()))
       counter.update(dicto)
@@ -207,57 +166,34 @@ class Corpus():
       parquet.write_table(tb, cache_loc)
     return tb
 
-  def feature_counts(self, dir = None):
+  def __getattr__(self, key):
+    try:
+      return self.transformations[key]
+    except KeyError:
+      self.transformations[key] = transformations[key](self)
+      return self.transformations[key]
+      
+  '''
+  def feature_counts(self):
     if dir is None:
       dir = self.root / "feature_counts"
     for f in Path(dir).glob("*.parquet"):
       metadata = parquet.ParquetFile(f).schema_arrow.metadata.get(b'nc_metadata')
       metadata = json.loads(metadata.decode('utf-8'))
       yield (metadata, parquet.read_table(f))
+  '''
 
   @property
   def wordids(self):
     """
     Returns wordids in a dict format. 
     """
+    logger.warning("Using dict method for wordids, which is slower.")
     w = self.total_wordcounts
     tokens = w['token']
     counts = w['count']
     return dict(zip(tokens.to_pylist(), counts.to_pylist()))
 
-  @property
-  def encoded_wordcounts(self):
-    i = 0
-    bookid_lookup = self.metadata.id_to_int_lookup
-    wordids = pl.from_arrow(self.total_wordcounts.select(["token", "wordid"]))
-    batches = []
-    cache_size = 0
-
-    for batch in self.token_counts:
-        try:
-            id = batch_id(batch)
-            bookid = bookid_lookup[id]
-        except KeyError:
-            raise
-        tab = pa.table({
-            'bookid': pa.array(np.full(len(batch), bookid, dtype = np.uint32), pa.uint32()),
-            'token': batch['token'],
-            'count': batch['count']
-        })
-        batches.append(tab)
-        cache_size += tab.nbytes
-        if cache_size > 5_000_000:
-          remainder = pl.from_arrow(pa.concat_tables(batches))
-          q = wordids.join(remainder, left_on=["token"], right_on=["token"], how="inner", )
-          for b in q.to_arrow().select(["bookid", "wordid", "count"]).to_batches():
-              yield b          
-          cache_size = 0
-          batches = []
-    remainder = pl.from_arrow(pa.concat_tables(batches))
-    q = wordids.join(remainder, left_on=["token"], right_on=["token"], how="inner", )
-    for b in q.to_arrow().select(["bookid", "wordid", "count"]).to_batches():
-        yield b
-      
   def write_feature_counts(self,
     single_files:bool = True,
     chunk_size:Optional[int] = None,
@@ -306,186 +242,3 @@ class Corpus():
     i = random.randint(0, len(self.metadata.tb) - 1)
     id = self.metadata.tb.column("@id")[i].as_py()
     return Document(self, id)
-
-class Tokenization(ArrowIDBatchReservoir):
-  name = "tokenization"
-  arrow_schema = pa.schema({
-    'token': pa.utf8()
-  })
-
-  def _from_upstream(self) -> Iterator[pa.RecordBatch]:
-    for id, text in self.corpus.texts:
-      tokens = tokenize(text)
-      yield pa.record_batch(
-        [tokens],
-        schema=self.arrow_schema.with_metadata({"@id": id})
-      )
-
-class TokenCounts(ArrowIDBatchReservoir):
-  name = "token_counts"
-  arrow_schema = pa.schema({
-    'token': pa.utf8(),
-    'count': pa.uint32()
-  })
-
-  def __init__(self, *args, **kwargs):
-    self.ids_two = []
-    self.doc_lengths = []
-    super().__init__(*args, **kwargs)
-
-  def flush_wordcounts(self, uuid):
-    parent = self.corpus.root / "document_lengths"
-    parent.mkdir(exist_ok = True)
-    path = (parent / uuid).with_suffix(".feather")
-    tab = pa.table(
-      {"id": pa.array(self.ids_two, pa.string()),
-      "count": pa.array(self.doc_lengths, pa.uint32())}
-    )
-    feather.write_feather(tab, path)
-    self.ids_two = []
-    self.doc_lengths = []
-
-  def _from_upstream(self) -> Iterator[pa.RecordBatch]:
-    current_uuid = None
-    for batch in self.corpus.tokenization:
-      id = batch_id(batch)
-      counts = token_counts(batch['token'], id)
-      if self.current_file_uuid != current_uuid and current_uuid is not None:
-        self.flush_wordcounts(current_uuid)
-        current_uuid = self.current_file_uuid
-      total_wordcount = pc.sum(counts['count']).as_py()
-      self.ids_two.append(id)
-      self.doc_lengths.append(total_wordcount)
-      yield counts
-
-    self.flush_wordcounts(self.current_file_uuid)
-
-class Ngrams(ArrowIDBatchReservoir):
-  def __init__(self, ngrams: int, corpus: Corpus, end_chars: List[str] = [], beginning_chars: List[str] = [], **kwargs):
-    """
-
-    Creates an (optionally cached) iterator over record batches of ngram counts.
-    Each batch is a single document, with columns ['token1', 'token2', ... , 'token{n}', count]
-
-    ngrams: an integer. Size of the ngrams to construct.
-    end_chars: a list of regular expression (re2 compatible) to treat as the *end* of an n-gram.
-               For instance, [r"[\.\?\!]"] would attach sentence-ending punctuators to the end of
-               n-grams but not the beginning, and not allow ngrams from separate sentence.
-    beginning_chars: a list of regular expression (re2 compatible) to treat as the *beginning* of an n-gram.
-               For instance, ["“", "<"] would attach opening curly quotes and angle brackets to n-grams with the letters that
-               follow. (This is provided experimentally, may be removed because it doesn't seem very useful.
-               But perhaps there are languages where it helps.)
-
-    *args, **kwargs: passed to ArrowReservoir.
-
-    """
-    self.ngrams = ngrams
-    self.name = f"{ngrams}gram_counts"
-    self.end_chars = end_chars
-    self.beginning_chars = beginning_chars
-    super().__init__(corpus, **kwargs)
-#    for n in range(ngrams):
-#      self.arrow_schema[f"token{n}"] = pa.utf8()
-#    self.arrow_schema['count'] = pa.uint32()
-
-  def _from_local(self):
-    pass
-
-  def _from_upstream(self) -> Iterator[pa.RecordBatch]:
-    ngrams = self.ngrams
-    for batch in self.corpus.tokenization:
-      id = batch_id(batch)
-      zengrams = ngrams - 1 # Zero-indexed ngrams--slightly more convenient here.
-      tokens = batch['token']
-      cols = {}
-      for n in range(ngrams):
-          if n == 0:
-              cols["token1"] = tokens[:-zengrams]
-          elif n == ngrams - 1:
-              cols[f"token{n+1}"] = tokens[n:]
-          else:
-              cols[f"token{n+1}"] = tokens[n:-(zengrams-n)]
-      ngram_tab = pa.table(cols)
-      if len(ngram_tab) < ngrams:
-        empty = [[]]
-        # Still register that we saw the id even if it's not long enough for ngrams
-        yield pa.RecordBatch.from_arrays(empty * len(self.arrow_schema.names), schema=self.arrow_schema.with_metadata({'@id': batch_id(batch)}))
-        continue
-      # Temporarily pass through pandas because https://github.com/pola-rs/polars/issues/668
-      t = pl.from_pandas(ngram_tab.to_pandas())
-      counts = t.groupby([f"token{i+1}" for i in range(ngrams)])\
-          .agg([pl.count("token1").alias("count")])
-
-      cols = []
-      for i in range(ngrams):
-          cols.append(counts[f'token{i+1}'].to_arrow().cast(pa.string()))
-      cols.append(counts['count'].to_arrow())
-      yield pa.RecordBatch.from_arrays(cols, schema=self.arrow_schema.with_metadata({'@id': batch_id(batch)}))
-
-class Bigrams(Ngrams):
-  """
-  Convenience around Ngrams for the case of n==2.
-  """
-  name = "bigrams"
-  arrow_schema = pa.schema(
-    {
-      'token1': pa.string(),
-      'token2': pa.string(),
-      'count': pa.uint32()
-    }
-  )
-  def __init__(self, corpus, **kwargs):
-    super().__init__(ngrams=2, corpus=corpus, **kwargs)
-
-class Trigrams(Ngrams):
-  """
-  Convenience around Ngrams for the case of n==2.
-  """
-  arrow_schema = pa.schema(
-    {
-      'token1': pa.string(),
-      'token2': pa.string(),
-      'token3': pa.string(),
-      'count': pa.uint32()
-    }
-  )
-  def __init__(self, corpus, **kwargs):
-    super().__init__(ngrams=3, corpus=corpus, **kwargs)
-
-class Quadgrams(Ngrams):
-  """
-  Convenience around Ngrams for the case of n==2.
-  """
-  arrow_schema = pa.schema(
-    {
-      'token1': pa.string(),
-      'token2': pa.string(),
-      'token3': pa.string(),
-      'token4': pa.string(),
-      'count': pa.uint32()
-    }
-  )
-  def __init__(self, corpus, **kwargs):
-    super().__init__(ngrams=3, corpus=corpus, **kwargs)
-
-class Quintgrams(Ngrams):
-  """
-  Convenience around Ngrams for the case of n==2.
-  """
-  arrow_schema = pa.schema(
-    {
-      'token1': pa.string(),
-      'token2': pa.string(),
-      'token3': pa.string(),
-      'token4': pa.string(),
-      'token5': pa.string(),
-      'count': pa.uint32()
-    }
-  )
-
-  def __init__(self, corpus, **kwargs):
-    super().__init__(ngrams=3, corpus=corpus, **kwargs)
-
-
-class ChunkedTokenCounts(TokenCounts):
-  name = "chunked_counts"

@@ -71,8 +71,8 @@ class TestMetadata():
   def test_upstream_changes_invalidate_cache(self):
     pass
   def test_autogenerate_textids(self, dissertation_corpus, non_metadata_corpus):
-    assert len(dissertation_corpus.metadata.text_ids) == 12
-    assert len(non_metadata_corpus.metadata.text_ids) == 3
+    assert len(dissertation_corpus.metadata.ids) == 12
+    assert len(non_metadata_corpus.metadata.ids) == 3
 
   def test_use_metadata_field(self, dissertation_corpus, tmpdir):
     pass
