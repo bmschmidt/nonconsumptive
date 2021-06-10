@@ -26,7 +26,6 @@ def dissertation_corpus(corrected_dissertations, tmpdir):
             dir = tmpdir,
             text_options = {"text_field" : "dissertation"})
 
-
 @pytest.fixture(scope="function")
 def non_metadata_corpus(tmpdir_factory):
   dir = Path(str(tmpdir_factory.mktemp("testing")))
@@ -38,9 +37,11 @@ class TestMetadata():
   def test_cat_alone_makes_metadata(self, dissertation_corpus):
     tb = dissertation_corpus.metadata.tb
     assert len(tb) == 12
+
   def test_text_alone_makes_metadata(self, non_metadata_corpus):
     tb = non_metadata_corpus.metadata.tb
-    assert len(tb) == 3    
+    assert len(tb) == 3
+
   def test_feather_files_written(self, tmpdir):
     pass
 
@@ -70,6 +71,7 @@ class TestMetadata():
 
   def test_upstream_changes_invalidate_cache(self):
     pass
+
   def test_autogenerate_textids(self, dissertation_corpus, non_metadata_corpus):
     assert len(dissertation_corpus.metadata.ids) == 12
     assert len(non_metadata_corpus.metadata.ids) == 3

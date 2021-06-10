@@ -11,8 +11,6 @@ from typing import List, Set, Dict, Tuple, Optional, Iterator, Union
 import logging
 logger = logging.getLogger("nonconsumptive")
 
-
-
 def split(batch, key):
     """
     Partition (not sort) a table into front half, back half.
@@ -69,7 +67,7 @@ def is_ordered(new_files, batch_size):
     return True
 
 
-# Better Key: pc.add(tb['bookid'], pc.multiply(tb['wordid'], pc.add(1, pc.min_max(tb['bookid'])['max'])))
+# Better Key: pc.add(tb['_ncid'], pc.multiply(tb['wordid'], pc.add(1, pc.min_max(tb['_ncid'])['max'])))
 
 def from_csv(input, keys, output, block_size):
     output = Path(output)
@@ -77,7 +75,7 @@ def from_csv(input, keys, output, block_size):
     print("Parsing CSV")
     f = csv.open_csv(input, read_options = csv.ReadOptions(block_size = block_size),
             parse_options = csv.ParseOptions(delimiter = ","), convert_options= csv.ConvertOptions(
-            column_types={'bookid': pa.uint32(), 'wordid': pa.uint32(), 'count': pa.uint32()}))
+            column_types={'_ncid': pa.uint32(), 'wordid': pa.uint32(), 'count': pa.uint32()}))
     quacksort(f, keys, output, block_size)
 
 def from_feather(input, keys, output, block_size):

@@ -1,4 +1,8 @@
 from __future__ import annotations
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+  import nonconsumptive as nc
+  from nonconsumptive import Corpus
 import json
 import pyarrow as pa
 from pyarrow import compute as pc
@@ -23,43 +27,32 @@ logger = logging.getLogger("nonconsumptive")
 
 nc_schema_version = 0.1
 
-def cat_from_filenames(corpus) -> Metadata:
-  ids = []
-  for (doc, text) in corpus.texts:
+def cat_from_filenames(corpus: Corpus, path):
+  ids: List[str] = []
+  for (doc, _) in corpus.texts:
     ids.append(doc)
   # Not usually done, but necessary here to 
   # ensure reproducibility across runs
   # because filenames aren't cached.
   ids.sort()
   tb = pa.table({"@id": pa.array(ids, pa.utf8())})
-  return tb
+  feather.write_feather(tb, path)
 
 class Metadata(object):
-  def __init__(self, corpus: nc.Corpus, raw_file: Optional[Union[str, Path]]):
+  def __init__(self, corpus: nc.Corpus, raw_file: Path):
     self.corpus = corpus
     self._tb = None
     if self.nc_metadata_path.exists():
       if raw_file is not None:
         if self.nc_metadata_path.stat().st_mtime < Path(raw_file).stat().st_mtime:
           logger.info("Deleting out-of-date NC catalog.")
-          self.nc_metadata_path.exists.unlink()
+          self.nc_metadata_path.unlink()
         else:
-#          logger.info("Loading @id field from on-disk catalog.")
-#          self.load_processed_catalog(["@id"])
           return
       else:
-#        logger.info("Loading @id field from on-disk catalog.")
-#        self.load_processed_catalog(["@id"])
         return
-    if raw_file is None:
-      # When no metadata is passed, create minimal metadata from the 
-      # filenames on disk.
-      logger.info("Creating catalog from filenames")
-      basic_ids = cat_from_filenames(corpus)
-      catalog = Catalog(None, self.nc_metadata_path, table = basic_ids)
-    else:
-      logger.info(f"Creating catalog from {raw_file}.")
-      catalog = Catalog(raw_file, self.nc_metadata_path)
+    logger.info(f"Creating catalog from {raw_file}.")
+    catalog = Catalog(raw_file, self.nc_metadata_path, identifier = corpus.metadata_options['id_field'])
     self._ids = None
     logger.info(f"Saving metadata ({len(catalog.nc_catalog)} rows)")
     feather.write_feather(catalog.nc_catalog, self.nc_metadata_path)
@@ -83,6 +76,7 @@ class Metadata(object):
     logger.warning("Expensively creating table")
     self.load_processed_catalog()
     return self._tb
+
   def __iter__(self):
     pass
 
@@ -112,7 +106,7 @@ class Metadata(object):
       pa.array(ints),
       self.tb["@id"]
       ], [
-        "bookid",
+        "_ncid",
         "@id"
       ])  
     pa.feather.write_feather(tb, dest)
@@ -120,7 +114,7 @@ class Metadata(object):
   @property
   def id_to_int_lookup(self):
     ids = self.text_ids
-    dicto = dict(zip(ids["@id"].to_pylist(), ids['bookid'].to_pylist()))
+    dicto = dict(zip(ids["@id"].to_pylist(), ids['_ncid'].to_pylist()))
     return dicto
   """
 
@@ -159,8 +153,8 @@ class Metadata(object):
       dict_tables = set()
 
       tables = defaultdict(dict)
-      tables['fastcat']['bookid'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
-      tables['catalog']['bookid'] = tables['fastcat']['bookid']
+      tables['fastcat']['_ncid'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
+      tables['catalog']['_ncid'] = tables['fastcat']['_ncid']
       for name, col in zip(batch.schema.names, batch.columns):
         if pa.types.is_string(col.type):
           tables['catalog'][name] = col
@@ -194,7 +188,7 @@ class Metadata(object):
       )
       parquet.write_table(tab, outpath  / (table_name + ".parquet"))
 
-def id_field(tb: pa.Table) -> str:
+def infer_id_field(tb: pa.Table) -> str:
   """
   tb: a pyarrow table to find the id field from
   """
@@ -203,10 +197,10 @@ def id_field(tb: pa.Table) -> str:
     return tb.schema[0].name
   for field in tb.schema:
     if field.name in default_names:
-       return field.name
+      return field.name
   raise NameError("No columns named '@id', 'id' or 'filename' in data; please manually set an id for each document.")
 
-def ingest_json(file:Path):
+def ingest_json(file:Path) -> pa.Table:
 
     """
     JSON ingest includes some error handling for values with inconsistent encoding as 
@@ -251,7 +245,7 @@ class Catalog():
     where records represented in a catalog are not even textual.
 
     """
-    def __init__(self, file: Union[str, Path], final_location: Union[str, Path] = None, identifier = None, exclude_fields = set([]), table = None):
+    def __init__(self, file: Optional[Union[str, Path]], final_location: Optional[Union[str, Path]] = None, identifier: Optional[str] = None, exclude_fields = set([])):
       """
       file: the file to load. This can be either a raw csv, json, etc; or a final nonconsumptive parquet/feather file.
       final_location: If 'file' is not a nonconsumptive catalog, the location at which one should be stored.
@@ -278,26 +272,27 @@ class Catalog():
         self.format = self.file.suffix
       self.final_location = Path(final_location)
       self.tb = None
-      self.identifier = None
+      self.identifier = identifier
       if self.format == ".feather":
-        if not table:
-          self.tb = feather.read_table(self.file)
-        else:
-          self.tb = table
+        self.tb = feather.read_table(self.file)
         try:
+          # Check if the feather file is 
           self.nc_schema = self.tb.schema.metadata.get(b"nonconsumptive")
           return
         except:
           self.raw_tb = self.tb
           self.tb = None
+          
       self.load_existing_nc_metadata()
 
       if self.tb is None:
         self.load_preliminary_file(self.file)
         if self.identifier is None:
-          self.identifier = id_field(self.raw_tb)
+          self.identifier = infer_id_field(self.raw_tb)
+        else:
+          pass
       else:
-        self.identifier = "@id"
+        self.identifier = "this shouldn't matter"
 
     def load_existing_nc_metadata(self):
       if not self.final_location.exists():
@@ -313,7 +308,12 @@ class Catalog():
         self.load_ndjson(path)
       elif self.format == ".csv":
         self.load_csv(path)
+      elif self.format == ".feather":
+        print(path)
+        self.load_feather(path)
 
+    def load_feather(self, file):
+      self.raw_tb = pa.feather.read_table(file)
     def load_ndjson(self, file):
       """
       Read metadata from an ndjson file.

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from .document import Document
 from pyarrow import parquet, feather, ipc
@@ -8,6 +10,7 @@ import yaml
 import numpy as np
 from numpy import packbits
 import logging
+import nonconsumptive as nc
 
 logger = logging.getLogger("nonconsumptive")
 
@@ -18,17 +21,16 @@ from .utils import ConsumptionError
 SRP = None
 
 class BatchIDIndex(object):
-  def __init__(self, corpus, uuid, batch_size = 1024 * 16):
-    self.uuid = uuid
-    self.corpus = corpus
-    self.dir = corpus.root / "build" / "batch_indices"
+  def __init__(self, corpus: nc.Corpus, batch_size: int = 1024 * 16):
+    self.corpus: nc.Corpus = corpus
+    self.dir : Path = corpus.root / "build" / "batch_indices"
     self.dir.mkdir(exist_ok = True, parents = True)
-    self.fn = self.dir / f"{uuid}.feather"
+    self.fn = self.dir / f"{self.corpus.uuid}.feather"
     self.batch_size = batch_size
     self.cache = []
     self.ncid_lookup = None
     self._fout = None
-    self.schema = pa.schema({
+    self.schema: pa.Schema = pa.schema({
           "@id": pa.string(),
           "_ncid": pa.uint32()})
   def exists(self):
@@ -41,21 +43,18 @@ class BatchIDIndex(object):
     logger.warning("Here we are now!")
 
     self._fout = ipc.new_file(self.fn, self.schema)
-
     return self._fout
 
   def fill(self):
     """
     Create a child index and fill it up at once.
     """
-    logger.warning("Here we go!")
-    with BatchIDIndex(self.corpus, self.uuid, self.batch_size) as holder:
-      logger.warning("Here we are!")
+    with BatchIDIndex(self.corpus, self.batch_size) as holder:
       for id, _ in self.corpus.texts:
         holder.push(id)
       
     
-  def iter_ids(self, which = '@id'):
+  def iter_ids(self, which: str = '@id') -> Iterator[str]:
     if not self.fn.exists():
       logger.warning("ID lookup requested, but none found: "
                       "materializing one inefficiently with a full pass through "
@@ -92,7 +91,7 @@ class Node(object):
   __doc__ = """
   An abstract point in a text transformation pipeline.
   """
-  def __init__(self, corpus: "Corpus"):
+  def __init__(self, corpus: nc.Corpus):
     self.uuid = corpus.uuid
     self.corpus = corpus
 
@@ -271,7 +270,6 @@ class ArrowIDChunkedReservoir(ArrowReservoir):
       dtype = pa.string()
     new_schema = self.arrow_schema.insert(0, pa.field(id_type, dtype))
     # TODO: zip(strict=True) when only py 3.10 or later is supported?
-
     for id, batch in zip(self.corpus.batch_ids(self.uuid, id_type), self):
       id = pa.array([id] * len(batch), dtype)
       yield pa.RecordBatch.from_arrays(

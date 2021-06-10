@@ -51,7 +51,7 @@ class NewTestVolume():
         df = counts.to_pandas()
         assert(counts['wordid'].to_pandas().max() == counts.shape[0] -1 )
 
-    def test_bookids(self, simple_corpus):
+    def test__ncids(self, simple_corpus):
         meta = simple_corpus.metadata
         lookup = meta.id_to_int_lookup()
         for letter in "abг":

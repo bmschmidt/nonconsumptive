@@ -1,28 +1,34 @@
+from __future__ import annotations
+
 from pathlib import Path
 from .document import Document, tokenize, token_counts
 import pyarrow as pa
 from pyarrow import parquet, feather, RecordBatch 
 from pyarrow import compute as pc
-import json
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+  import nonconsumptive as nc
 import numpy as np
 from bounter import bounter
 from collections import defaultdict
-from typing import DefaultDict, Iterator, Union, Optional, List, Tuple
+from typing import DefaultDict, Iterator, Union, Optional, List, Tuple, Set, Dict
 import polars as pl
-from .data_storage import ArrowIDChunkedReservoir, ArrowReservoir, BatchIDIndex
-
+from .data_storage import BatchIDIndex
+import uuid
 from .prefs import prefs
-from .metadata import Metadata
+from .metadata import Metadata, cat_from_filenames
 from .inputs import FolderInput, SingleFileInput, MetadataInput
 from .transformations import transformations
 import logging
 logger = logging.getLogger("nonconsumptive")
 
-class Corpus():
+StrPath = Union[str, Path]
 
-  def __init__(self, dir, texts = None, 
-               metadata = None, cache_set = None, 
-               text_options = {"format": None, "compression": None, "text_field": None},
+class Corpus():
+  def __init__(self, dir: StrPath, texts: Optional[StrPath] = None, 
+               metadata: Optional[StrPath] = None, cache_set: Optional[Set[str]] = None, 
+               text_options: Dict[str, Optional[str]] = {"format": None, "compression": None, "text_field": None},
+               metadata_options: Dict[str, Optional[str]] = {"id_field": None},
                total_batches: Optional[int] = None,
                this_batch: int = 0):
 
@@ -37,7 +43,7 @@ class Corpus():
                 be created based on filenames.
     cache_set -- Which elements created by the nc_pipeline should be persisted to disk. If None,
                  defaults will be taken from .prefs().
-    format    -- The text format used ('.txt', '.html', '.tei', '.md', etc.)
+    format    -- The text format used ('txt', 'html', 'tei', 'md', etc.)
     compression -- Compression used on texts. Only '.gz' currently supported.
     total_batches -- how many chunks to process the corpus in.
     this_batch -- the batch number we're in right now. For multiprocessing, etc. zero-indexed.
@@ -49,18 +55,17 @@ class Corpus():
       assert self.fraction[0] <= self.fraction[1]
       self.uuid : str = str(uuid.uuid1())
     self.fraction = 0
+    self.metadata_options = metadata_options
     if texts is not None: 
       self.full_text_path = Path(texts)
     else:
       self.full_text_path = None
-    if metadata is not None:
-      self.metadata_path = Path(metadata)
+
+    if "text_field" in text_options:
+      self.text_field = text_options["text_field"]
     else:
-      self.metadata_path = None
+      self.text_field = None
     self.root: Path = Path(dir)
-    self._metadata = None
-    # which items to cache.
-    self._cache_set = cache_set
 
     if "format" in text_options and text_options['format'] is not None:
       self.format = text_options["format"]
@@ -71,15 +76,26 @@ class Corpus():
       self.compression = text_options["compression"]
     else:
       self.compression = None
+    self._metadata = None
 
-    if "text_field" in text_options:
-      self.text_field = text_options["text_field"]
-    else:
-      self.text_field = None
     self._texts = None
+
+    if metadata is not None:
+      self.metadata_path = Path(metadata)
+    else:
+      self.metadata_path = Path(self.root / "identifiers.feather")
+      cat_from_filenames(self, self.metadata_path)
+      # force creation
+      _ = self.metadata
+
+    self.root.mkdir(exist_ok = True)
+    # which items to cache.
+    self._cache_set = cache_set
+
+
     self.transformations = {}
 
-  def setup_input_method(self, full_text_path, method):
+  def setup_input_method(self, full_text_path: Path, method: str):
     if method is not None:
       return method
     if full_text_path.is_dir():
@@ -103,14 +119,14 @@ class Corpus():
     elif self.full_text_path.is_dir():
       self.text_location = self.full_text_path
       assert self.text_location.exists()
-      self._texts = FolderInput(self, compression = self.compression, format = self.format)
+      self._texts = FolderInput(self)
     elif self.full_text_path.exists():
-      self._texts =  SingleFileInput(self, compression = self.compression, format = self.format)
+      self._texts =  SingleFileInput(self)
     else:
       raise NotImplementedError("No way to handle desired texts. Please pass a file, folder, or metadata field.")
     return self._texts
 
-  def clean(self, targets = ['metadata', 'tokenization', 'token_counts']):
+  def clean(self, targets: List[str] = ['metadata', 'tokenization', 'token_counts']):
     import shutil
     for d in targets:
       shutil.rmtree(self.root / d)
@@ -123,20 +139,20 @@ class Corpus():
     return self._metadata
 
   @property
-  def cache_set(self):
+  def cache_set(self) -> Set[str]:
     if self._cache_set:
       return self._cache_set
     else:
-      return {}
+      return set([])
 
-  def path_to(self, id):
+  def path_to(self, id: str):
     p1 = self.full_text_path / (id + ".txt.gz")
     if p1.exists():
       return p1
     logger.error(FileNotFoundError("HMM"))
   
   @property
-  def documents(self):
+  def documents(self) -> Iterator[nc.Document]:
     if self.metadata and self.metadata.tb:        
       for id in self.metadata.tb["@id"]:
         yield Document(self, str(id))
@@ -157,7 +173,7 @@ class Corpus():
       counter.update(dicto)
     tokens, counts = zip(*counter.items())
     del counter
-    tb = pa.table([pa.array(tokens, pa.utf8()), pa.array(counts, pa.uint32())],
+    tb: pa.Table = pa.table([pa.array(tokens, pa.utf8()), pa.array(counts, pa.uint32())],
       names = ['token', 'count']
     )
     tb = tb.take(pc.sort_indices(tb, sort_keys=[("count", "descending")]))

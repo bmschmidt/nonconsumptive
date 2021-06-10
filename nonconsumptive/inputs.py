@@ -4,7 +4,6 @@ from typing import Callable, Iterator, Union, Optional, List, Tuple
 import logging
 import gzip
 from pyarrow import feather, ipc
-import uuid
 from .data_storage import Node, BatchIDIndex
 logger = logging.getLogger("nonconsumptive")
 
@@ -23,17 +22,24 @@ class TextInput(Node):
   def _iter_documents(self):
     raise NotImplementedError("No documents method defined.")
 
+  def __getitem__(self):
+    raise NotImplementedError("This text input type does not support random item access.")
+
   def __iter__(self) -> Iterator[Tuple[str, str]]:
     """
     The texts iterate over the documents in order
     and stash the ids somewhere.
     """
-    with BatchIDIndex(self.corpus) as batch_ids:
-      create_ids = not batch_ids.exists()
+    if self.corpus._metadata is not None:
+      with BatchIDIndex(self.corpus) as batch_ids:
+        create_ids = not batch_ids.exists()
+        for id, text in self._iter_documents():
+          if create_ids:
+            batch_ids.push(id)
+          yield id, text
+    else:
       for id, text in self._iter_documents():
-        if create_ids:
-          batch_ids.push(id)
-        yield text, id
+        yield id, text
 
 class SingleFileInput(TextInput):
   __doc__ = """
@@ -53,8 +59,7 @@ class SingleFileInput(TextInput):
     self.dir = dir
     super().__init__(corpus)
 
-
-  def __iter__(self) -> Iterator[Tuple[str, str]]:
+  def _iter_documents(self) -> Iterator[Tuple[str, str]]:
     errored = []
     opener: function = open
     if self.compression == "gz":
@@ -78,28 +83,29 @@ class FolderInput(TextInput):
   """
   def __init__(self,
         corpus: "Corpus",
-        compression: Optional[str] = None,
-        format: str = "txt"):
-    self.format = format
+        compression: Optional[str] = None):
+    self.format = corpus.format
     self.corpus = corpus
-    self.compression = compression
+    self.compression = corpus.compression
     self.dir = corpus.full_text_path
+    self.suffix = "." + self.format
+    if self.compression:
+      self.suffix += f".{compression}"
     super().__init__(corpus)
 
   def documents(self) -> Iterator[Document]:
-    if self.compression is None:
-      glob = f"**/*.{self.format}"
-    else:
-      glob = f"**/*.{self.format}.{self.compression}"
+    glob = f"**/*{self.suffix}"
     assert(self.dir.exists())
     for f in self.dir.glob(glob):
       yield Document(self.corpus, path = f)
 
-  def __iter__(self) -> Iterator[Tuple[str, str]]:
+  def __getitem__(self, key):
+    return Document(self.corpus, path = self.dir / f"{key}{self.suffix}")
+
+  def _iter_documents(self) -> Iterator[Tuple[str, str]]:
     for doc in self.documents():
       id = doc.id
       yield id, doc.full_text
-
 
 class MetadataInput(TextInput):
   __doc__ = """
@@ -109,16 +115,15 @@ class MetadataInput(TextInput):
   Rather than parse multiple times, the best practice here is to convert to 
   feather *once* and then extract text and ids from the metadata column.
   """
-  def __init__(self,
-      corpus: "Corpus"):
+  def __init__(self, corpus: "Corpus"):
     self.corpus = corpus
     self.text_field = corpus.text_field
-    super().__init__()
+    super().__init__(corpus)
 
   def __iter__(self) -> Iterator[Tuple[str, str]]:
     fin = self.corpus.metadata.nc_metadata_path
     table = feather.read_table(fin, columns = ['@id', self.text_field])
-    table = ipc.open_file(corpus.root / "nonconsumptive_catalog.feather")
+    table = ipc.open_file(self.corpus.root / "nonconsumptive_catalog.feather")
     for i in range(table.num_record_batches):
       batch = table.get_batch(i)
       for id, text in zip(batch['@id'], batch[self.text_field]):

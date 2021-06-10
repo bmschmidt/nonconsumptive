@@ -82,7 +82,6 @@ class EncodedCounts(ArrowReservoir):
         derived[name] = tb[name] 
     return pa.table(derived)
 
-
   def _from_upstream(self) -> pa.Table:
     wordids = self.corpus.total_wordcounts["token"]
     cache_size = 0
