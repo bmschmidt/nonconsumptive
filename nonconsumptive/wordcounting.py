@@ -55,7 +55,7 @@ def chunk_tokens(tokens, chunk_size):
   yield tokens[pos:]
 
 def wordcounts(tokens) -> pa.RecordBatch:
-  counts = Counter(tokens)
+  counts : Counter = Counter(tokens)
   keys = counts.keys()
   values = counts.values()
   return pa.record_batch([

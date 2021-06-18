@@ -44,7 +44,7 @@ class Document(BaseDocument):
     self._path = path    
 
   @property
-  def full_text(self, mode = "r"):
+  def full_text(self):
     document = self.path
     if document.suffix == ".gz":
       fin = gzip.open(document, "rt")
@@ -52,17 +52,19 @@ class Document(BaseDocument):
       fin = document.open()
     return fin.read()
 
+  """
   @property
   def tokens(self) -> pa.StringArray:
     # Could get a lot fancier here.
     return self.corpus.tokenization.get_id(self.id)
+  """
 
   def tokenize(self) -> pa.StringArray:
     return tokenize(self.full_text)
 
-  def ngrams(self, n) -> List[Tuple[str]]:
-      vars = [self.tokens[n-i:i-n-1] for i in range(0, n)]
-      return zip(*vars)
+#  def ngrams(self, n) -> List[Tuple[str]]:
+#      vars = [self.tokens[(n-i):(i-n-1)] for i in range(0, n)]
+#      return zip(*vars)
 
   def __repr__(self):
     return str(self)
@@ -74,12 +76,13 @@ class Document(BaseDocument):
   def metadata(self):
     return self.corpus.metadata.get(self.id)
 
-  def chunked_wordcounts(self, chunk_size) -> pa.RecordBatch:
-    """
-    As with the core elements 
-    """
-    return chunked_wordcounts(self.tokens, chunk_size)
+#  def chunked_wordcounts(self, chunk_size) -> pa.RecordBatch:
+#    """
+#   As with the core elements 
+#    """
+#    return chunked_wordcounts(self.tokens, chunk_size)
 
+"""
   @property
   def wordcounts(self) -> pa.RecordBatch:
     c = pa.RecordBatch.from_struct_array(self.tokens['token'].value_counts())
@@ -90,6 +93,7 @@ class Document(BaseDocument):
       "count": pa.uint32()},
       metadata={'nc_metadata': json.dumps(self.metadata, default=str)})
     )
+"""
 
 def tokenize(string) -> pa.Array:
     return pa.array(re.findall(r"[\w^_]+|[^\w\s]+", string))

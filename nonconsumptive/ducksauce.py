@@ -9,7 +9,7 @@ import argparse
 import random
 from typing import List, Set, Dict, Tuple, Optional, Iterator, Union
 import logging
-logger = logging.getLogger("nonconsumptive")
+logger = logging.getLogger("ducksauce")
 
 def split(batch, key):
     """
@@ -27,7 +27,7 @@ def split(batch, key):
     try:
         sort_order = pc.partition_nth_indices(batch[key], options=pc.PartitionNthOptions(mid))
     except:
-        print(mid, batch[key])
+        logger.error("Couldn't partition", mid, batch[key])
         raise
     front = batch.take(sort_order[0:mid])
     end = batch.take(sort_order[mid:])
@@ -72,7 +72,7 @@ def is_ordered(new_files, batch_size):
 def from_csv(input, keys, output, block_size):
     output = Path(output)
     input = Path(input)
-    print("Parsing CSV")
+    logger.info("Parsing metadata from CSV")
     f = csv.open_csv(input, read_options = csv.ReadOptions(block_size = block_size),
             parse_options = csv.ParseOptions(delimiter = ","), convert_options= csv.ConvertOptions(
             column_types={'_ncid': pa.uint32(), 'wordid': pa.uint32(), 'count': pa.uint32()}))
@@ -81,7 +81,7 @@ def from_csv(input, keys, output, block_size):
 def from_feather(input, keys, output, block_size):
     output = Path(output)
     input = Path(input)
-    print("Parsing feather")
+    logger.info("Parsing metadata from feather")
     inp = ipc.open_file(input)
 
     def yielder():
@@ -136,6 +136,11 @@ class MyTable():
         self._table = feather.read_table(self.path, memory_map = True)
         return self._table
     
+    def __getattr__(self, key):
+        return self.table.__getattr__(key)
+    def __getitem__(self, key):
+        return self.table.__getitem__(key)
+        
     def set_min_max(self, table, key):
         self.minmax = pc.min_max(table[key]).as_py()
 
@@ -167,7 +172,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
     key = keys[0]
     n_written = 0
     with TemporaryDirectory() as tmp_dir:
-        logger.debug("Reading initial stream for sort.")
+        logger.info("Reading initial stream for quacksort.")
         for i, batch in enumerate(iterator):
             n_records += len(batch)
             cache_size += batch.nbytes
@@ -179,7 +184,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
                 for subbatch in array:
                     tables.append(MyTable(subbatch, tmp_dir, key))
                     n_written += 1
-                print(n_written, end = "\r")
+                logger.debug(n_written, f"batches written to {tmp_dir}")
                 cache = []
                 cache_size = 0
         # Flush the cache
@@ -192,7 +197,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
         assert(n_records == sum([f.length for f in tables]))
         
         n_splits = 3
-        logger.debug("Preparing shuffle sort.")
+        logger.info("Initial stream read: preparing shuffle sort.")
         while True:
             tables.sort(key = lambda x: x.minmax['min'])
             malordered = malordered_ranges(tables, block_size)
@@ -200,7 +205,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
                 break
             worst = malordered[0]
             score = sum([m[0] for m in malordered])
-            print(f"{score} bad, reordering {worst} ", end = "\r")
+            logger.info(f"{score} bad, reordering {worst} ", end = "\r")
             head = tables[:worst[1][0]]
             to_fix = tables[worst[1][0]:worst[1][1]]
             tail = tables[worst[1][1]:]
@@ -221,7 +226,7 @@ def quacksort(iterator: Iterator[pa.RecordBatch], keys: List[str], output: Union
         cache = []
         out_num = 0
         written = 0
-        print("\nFinishing sort.")
+        logger.info("Finishing sort.")
         final_outfile = None
         for i, tab in enumerate(tables):
             cache.append(tab.table)
@@ -283,8 +288,3 @@ def malordered_ranges(files, batch_size):
                 info.append(((right_max - right_min)/(right_max - left_min), (left_i, i + 1), "B"))
     info.sort(reverse = True)
     return info
-
-
-
-if __name__=="__main__":
-    main()

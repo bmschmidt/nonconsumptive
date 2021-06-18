@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from .document import Document, tokenize, token_counts
+from .document import Document
 import pyarrow as pa
 from pyarrow import parquet, feather, RecordBatch 
 from pyarrow import compute as pc
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
   import nonconsumptive as nc
@@ -15,22 +16,27 @@ from typing import DefaultDict, Iterator, Union, Optional, List, Tuple, Set, Dic
 import polars as pl
 from .data_storage import BatchIDIndex
 import uuid
-from .prefs import prefs
 from .metadata import Metadata, cat_from_filenames
-from .inputs import FolderInput, SingleFileInput, MetadataInput
+from .inputs import TextInput, FolderInput, SingleFileInput, MetadataInput
 from .transformations import transformations
+from .bookstack import Bookstack
 import logging
+
+from multiprocessing import Process, Queue
+from queue import Empty
+import time
+
 logger = logging.getLogger("nonconsumptive")
 
 StrPath = Union[str, Path]
 
 class Corpus():
   def __init__(self, dir: StrPath, texts: Optional[StrPath] = None, 
-               metadata: Optional[StrPath] = None, cache_set: Optional[Set[str]] = None, 
-               text_options: Dict[str, Optional[str]] = {"format": None, "compression": None, "text_field": None},
+               metadata: Optional[StrPath] = None,
+               cache_set: Optional[Set[str]] = None, 
+               text_options: Dict[str, Optional[str]] = {},
                metadata_options: Dict[str, Optional[str]] = {"id_field": None},
-               total_batches: Optional[int] = None,
-               this_batch: int = 0):
+               batching_options = {"batch_size": 2**16}):
 
     """Create a corpus
 
@@ -41,90 +47,72 @@ class Corpus():
     metadata -- the location of a metadata file with a suffix indicating 
                 the file type (.parquet, .ndjson, .csv, etc.) If not passed, bare-bones metadata will 
                 be created based on filenames.
-    cache_set -- Which elements created by the nc_pipeline should be persisted to disk. If None,
-                 defaults will be taken from .prefs().
+    cache_set -- Which elements created by the nc_pipeline should be persisted to disk.
     format    -- The text format used ('txt', 'html', 'tei', 'md', etc.)
     compression -- Compression used on texts. Only '.gz' currently supported.
     total_batches -- how many chunks to process the corpus in.
     this_batch -- the batch number we're in right now. For multiprocessing, etc. zero-indexed.
     """
-    if total_batches is None:
-        self.uuid : str = "all"
-    else:
-      self.fraction = (this_batch, total_batches - 1)
-      assert self.fraction[0] <= self.fraction[1]
-      self.uuid : str = str(uuid.uuid1())
-    self.fraction = 0
+
+    self.uuid : str = None
     self.metadata_options = metadata_options
-    if texts is not None: 
-      self.full_text_path = Path(texts)
-    else:
-      self.full_text_path = None
-
-    if "text_field" in text_options:
-      self.text_field = text_options["text_field"]
-    else:
-      self.text_field = None
     self.root: Path = Path(dir)
-
-    if "format" in text_options and text_options['format'] is not None:
-      self.format = text_options["format"]
-    else:
-      self.format = "txt"
-
-    if "compression" in text_options:
-      self.compression = text_options["compression"]
-    else:
-      self.compression = None
-    self._metadata = None
-
-    self._texts = None
-
-    if metadata is not None:
-      self.metadata_path = Path(metadata)
-    else:
-      self.metadata_path = Path(self.root / "identifiers.feather")
-      cat_from_filenames(self, self.metadata_path)
-      # force creation
-      _ = self.metadata
-
     self.root.mkdir(exist_ok = True)
+
+    if metadata is None:
+      self.setup_texts(texts, **text_options)
+      dummy_metadata = self.root / 'tmp_metadata.feather'
+      ids = pa.table([pa.array(self.text_input.ids(), pa.string())], names = ["@id"])
+      feather.write_feather(ids, dummy_metadata)
+      self.setup_metadata(dummy_metadata, **metadata_options)
+      dummy_metadata.unlink()
+    else:
+      self.setup_metadata(metadata, **metadata_options)
+      if texts is None:
+        texts = Path(self.metadata.path)
+        try:
+          assert "text_field" in text_options
+        except AssertionError:
+          raise KeyError("Must pass `text_field` variable for catalog "
+                        "if no text location passed")
+        self.setup_texts(texts, from_metadata = True, **text_options)
+      else:
+        self.setup_texts(texts, from_metadata = False, **text_options)
+
     # which items to cache.
     self._cache_set = cache_set
 
-
-    self.transformations = {}
-
-  def setup_input_method(self, full_text_path: Path, method: str):
-    if method is not None:
-      return method
-    if full_text_path.is_dir():
-      return
+    # Later, create the bookstacks where transformations will be stored.
+    self._total_wordcounts = None
+    self._stacks = None
 
   def batch_ids(self, uuid: str, id_type: str) -> Iterator[RecordBatch]:
     assert id_type in ["_ncid", "@id"]
-    ids = BatchIDIndex(self, uuid)
+    ids = BatchIDIndex(self)
     return ids.iter_ids(id_type)
 
   @property
-  def texts(self):
+  def text_input(self):
+    return self._texts
+
+  def setup_metadata(self, location, **kwargs):
+    location = Path(location)
+    self._metadata = Metadata(self, location)
+
+  def setup_texts(self, texts: StrPath, from_metadata = False, text_field : Optional[str] = None, **kwargs):
     # Defaults based on passed input. This may become the only method--
     # it's not clear to me why one should have to pass both.
-    if self._texts is not None:
-      return self._texts
-    if self.text_field is not None:
-      if self.full_text_path is not None:
-        raise ValueError("Can't pass both a full text path and a key to use for text inside the metadata.")
-      self._texts = MetadataInput(self)
-    elif self.full_text_path.is_dir():
-      self.text_location = self.full_text_path
-      assert self.text_location.exists()
-      self._texts = FolderInput(self)
-    elif self.full_text_path.exists():
-      self._texts =  SingleFileInput(self)
+    texts = Path(texts)
+    assert texts.exists()
+    self._texts : TextInput
+
+    if from_metadata:
+      self._texts = MetadataInput(texts, text_field = text_field, **kwargs)
+      return
+    if texts.is_dir():
+      self._texts = FolderInput(texts, **kwargs)
     else:
-      raise NotImplementedError("No way to handle desired texts. Please pass a file, folder, or metadata field.")
-    return self._texts
+      self._texts =  SingleFileInput(texts, **kwargs)
 
   def clean(self, targets: List[str] = ['metadata', 'tokenization', 'token_counts']):
     import shutil
@@ -133,9 +121,6 @@ class Corpus():
 
   @property
   def metadata(self) -> Metadata:
-    if self._metadata is not None:
-      return self._metadata
-    self._metadata = Metadata(self, self.metadata_path)
     return self._metadata
 
   @property
@@ -144,12 +129,6 @@ class Corpus():
       return self._cache_set
     else:
       return set([])
-
-  def path_to(self, id: str):
-    p1 = self.full_text_path / (id + ".txt.gz")
-    if p1.exists():
-      return p1
-    logger.error(FileNotFoundError("HMM"))
   
   @property
   def documents(self) -> Iterator[nc.Document]:
@@ -161,43 +140,109 @@ class Corpus():
     return Document(self, id)
 
   @property
-  def total_wordcounts(self, max_bytes:int=100_000_000) -> pa.Table:
-    cache_loc = self.root / "wordids.parquet"
+  def total_wordcounts(self) -> pa.Table:
+    if self._total_wordcounts is not None:
+      return self._total_wordcounts
+    cache_loc = self.root / "wordids.feather"
     if cache_loc.exists():
       logger.debug("Loading word counts from cache")
-      return parquet.read_table(cache_loc)
+      self._total_wordcounts = feather.read_table(cache_loc)
+      return self._total_wordcounts
     logger.info("Building word counts")
     counter = bounter(4096)
-    for token, count in self.token_counts:
-      dicto = dict(zip(token.to_pylist(), count.to_pylist()))
+    for token, count in self.iter_over("token_counts"):
+      dicto = dict(zip(token.to_pylist(), count.to_numpy()))
       counter.update(dicto)
     tokens, counts = zip(*counter.items())
     del counter
     tb: pa.Table = pa.table([pa.array(tokens, pa.utf8()), pa.array(counts, pa.uint32())],
       names = ['token', 'count']
     )
+    del tokens
+    del counts
     tb = tb.take(pc.sort_indices(tb, sort_keys=[("count", "descending")]))
     tb = tb.append_column("wordid", pa.array(np.arange(len(tb)), pa.uint32()))
-    if "wordids" in prefs('cache') or 'wordids' in self.cache_set:
-      parquet.write_table(tb, cache_loc)
-    return tb
+    if "wordids" in self.cache_set:
+      # Materialize to save memory.
+      feather.write_feather(tb, cache_loc)
+      self._total_wordcounts = feather.read_table(cache_loc)
+      return self._total_wordcounts
+    else:
+      self._total_wordcounts = tb
+      return tb
 
-  def __getattr__(self, key):
-    try:
-      return self.transformations[key]
-    except KeyError:
-      self.transformations[key] = transformations[key](self)
-      return self.transformations[key]
+  def token_counts(self):
+    yield from self.iter_over("token_counts")
+  
+  def encoded_wordcounts(self):
+    # Enforce build of this *first*.
+    wordcounts = self.total_wordcounts
+    yield from self.iter_over("encoded_wordcounts")
+
+  def tokenization(self):
+    yield from self.iter_over('tokenization')
+
+  def bigrams(self):
+    yield from self.iter_over('bigrams')
+
+  def SRPFeatures(self):
+    yield from self.iter_over('SRPFeatures')
+
+  def document_lengths(self):
+    yield from self.iter_over('document_lengths')
+
+  def iter_over(self, key):
+    threads = 1
+
+    bookstack_queue = Queue(threads)
+    results_queue = Queue(threads * 2)
+    for stack in self.bookstacks:
+      yield from stack.get_transform(key)
+
+    """
+    def feed_stacks():
+      for stack in self.bookstacks:
+        bookstack_queue.put(stack)
+
+    def feed_results():
+      while True:
+        try:
+          stack = bookstack_queue.get(timeout = 1)
+        except Empty:
+          return
+        for item in stack.get_transform(key):
+           results_queue.put(item)
+
+    feeder = Process(target = feed_stacks).start()
+    workers = []
+
+    for i in range(8):
+      t = Process(target = feed_results)
+      t.start()
+      workers.append(t)
+    
+    while True:
+      try:
+        yield results_queue.get_nowait()
+      except Empty:
+        if running_processes(workers):
+          time.sleep(1/100)
+        else:
+          break
+      """
       
-  '''
-  def feature_counts(self):
-    if dir is None:
-      dir = self.root / "feature_counts"
-    for f in Path(dir).glob("*.parquet"):
-      metadata = parquet.ParquetFile(f).schema_arrow.metadata.get(b'nc_metadata')
-      metadata = json.loads(metadata.decode('utf-8'))
-      yield (metadata, parquet.read_table(f))
-  '''
+  @property
+  def bookstacks(self):
+    """
+    A set of reasonably-sized chunks of text to work with.
+    """
+    if self._stacks is not None:
+      return self._stacks
+    self._stacks = []
+    ids = self._create_bookstack_plan(2 ** 8)
+    for id in ids:
+      self._stacks.append(Bookstack(self, id))
+    return self._stacks
 
   @property
   def wordids(self):
@@ -209,44 +254,6 @@ class Corpus():
     tokens = w['token']
     counts = w['count']
     return dict(zip(tokens.to_pylist(), counts.to_pylist()))
-
-  def write_feature_counts(self,
-    single_files:bool = True,
-    chunk_size:Optional[int] = None,
-    batch_size:int = 250_000_000) -> None:
-    
-    """
-    Write feature counts with metadata for all files in the document.
-    dir: the location to place files into.
-    chunking: whether to break up files into chunks of n words.
-    single_files: Whether to write file per document, or group into batch
-    batch_size bytes.
-    """
-    dir = self.root / Path(prefs("paths.feature_counts"))
-    dir.mkdir(parents = True, exist_ok = True)
-    bytes = 0
-    counts = []
-    batch_num = 0
-    for doc in self.documents:
-      try:
-          wordcounts = doc.wordcounts
-      except IndexError:
-          print(doc.id)
-          raise
-      if single_files:
-        parquet.write_table(pa.Table.from_batches([wordcounts]), (dir / f"{doc.id}.parquet").open("wb"))
-      elif bytes > batch_size:
-        counts.append(wordcounts)
-        # Keep track of how big the table is.
-        bytes += wordcounts.nbytes
-        tab = pa.Table.from_batches(counts)
-        feather.write_feather(tab, (dir / str(batch_num)).with_suffix("feather"))
-        counts = []
-        batch_num += 1
-    if not single_files:
-      # final flush
-      tab = pa.Table.from_batches(counts)
-      feather.write_feather(tab, (dir / str(batch_num)).with_suffix("feather"))
            
   def first(self) -> Document:
     for doc in self.documents:
@@ -258,3 +265,27 @@ class Corpus():
     i = random.randint(0, len(self.metadata.tb) - 1)
     id = self.metadata.tb.column("@id")[i].as_py()
     return Document(self, id)
+
+  def _create_bookstack_plan(self, size = None):
+    if size is None:
+      size = 2 ** 16
+    dir = self.root / "bookstacks"
+    dir.mkdir(exist_ok = True)
+    cat = feather.read_table(self.metadata.path, columns = ["@id"])
+    ids = cat['@id']
+    batch_num = 0
+    i = 0
+    stack_names = []
+    while i < len(cat):
+      top = min(i + size, len(cat))
+      slice = ids[i:top]
+      tb = pa.table([
+        slice,
+        pa.array(range(i, top), pa.uint32())], 
+        names = ["@id", "_ncid"])
+      name = f"{batch_num:05d}"
+      feather.write_feather(tb, dir / f"{name}.feather", chunksize=size + 1)
+      stack_names.append(name)
+      i += size
+      batch_num += 1
+    return stack_names

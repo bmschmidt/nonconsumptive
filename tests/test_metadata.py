@@ -7,6 +7,8 @@ import pyarrow as pa
 from pyarrow import feather, json as pa_json
 import json
 
+
+
 @pytest.fixture(scope="session")
 def corrected_dissertations(tmpdir_factory):
   fn = tmpdir_factory.mktemp("ndjson").join("catalog.ndjson")
@@ -18,6 +20,7 @@ def corrected_dissertations(tmpdir_factory):
           del d[k]
       fout.write(json.dumps(d) + "\n")
   return Path(str(fn))
+
 
 @pytest.fixture(scope="function")
 def dissertation_corpus(corrected_dissertations, tmpdir):
@@ -32,7 +35,6 @@ def non_metadata_corpus(tmpdir_factory):
   return Corpus(texts = Path('tests', 'corpora', 'test1', 'texts'), 
                 metadata = None,
                 dir = dir, text_options = {"format" : "txt"}, cache_set = {})  
-
 class TestMetadata():
   def test_cat_alone_makes_metadata(self, dissertation_corpus):
     tb = dissertation_corpus.metadata.tb
@@ -69,6 +71,24 @@ class TestMetadata():
     tb = should_use_cache.metadata.tb
     assert len(tb) == 1
 
+  def test_feather_ingest(self, corrected_dissertations, tmpdir):
+    path = Path(str(tmpdir)) / "feather"
+    path.mkdir()
+
+    import pyarrow.json as json
+
+    tb = json.read_json(corrected_dissertations)
+    t2 = pa.table([tb['filename'], tb['dissertation'], tb['year']], names = ['alt_id_title', 'dissertation', 'year'])
+    feather.write_feather(t2, path / "input.feather")
+    corp = Corpus(texts = None,
+            metadata = path / "input.feather",
+            dir = tmpdir / "3",
+            metadata_options = {"id_field": "alt_id_title"},
+            text_options = {"text_field" : "dissertation"})
+
+    c = corp.metadata.tb['@id']
+    assert len(c) > 7
+
   def test_upstream_changes_invalidate_cache(self):
     pass
 
@@ -78,6 +98,7 @@ class TestMetadata():
 
   def test_use_metadata_field(self, dissertation_corpus, tmpdir):
     pass
+
 
 class TestCatalog():
   def test_ndjson_failure(self, tmpdir):

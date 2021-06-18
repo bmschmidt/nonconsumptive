@@ -4,8 +4,10 @@ import pyarrow as pa
 from pyarrow import ipc
 from .arrow_helpers import batch_id
 from numpy import packbits
-SRP = None
-Vector_file = None
+import types
+import SRP
+from SRP import Vector_file
+import logging
 
 def embed_to_SRP(corpus: Corpus, filepath = None, dims = 1280, flush_every = 512, **kwargs):
   """ 
@@ -31,9 +33,9 @@ def embed_to_SRP(corpus: Corpus, filepath = None, dims = 1280, flush_every = 512
   bits = []
   hashed = []
   fout = ipc.new_file(filepath, schema = schema)
-  for i, batch in enumerate(corpus.token_counts):
+  for i, batch in enumerate(corpus.token_counts()):
     id = batch_id(batch)
-    tokens = batch['token'].to_pylist()    
+    tokens = batch['token'].to_pylist()
     counts = batch['count'].to_numpy()
     hash_rep = hasher.stable_transform(words = tokens, counts = counts)
     bit_rep = packbits(hash_rep > 0).tobytes()
@@ -41,7 +43,7 @@ def embed_to_SRP(corpus: Corpus, filepath = None, dims = 1280, flush_every = 512
     bits.append(bit_rep)
     hashed.append(hash_rep)
     if i > 0 and i % flush_every == 0:
-      print("flushing", ids)
+      logging.debug("flushing", ids)
       fout.write_batch(pa.record_batch([
         pa.array(ids, schema[0].type),
         pa.array(hashed, schema[1].type),

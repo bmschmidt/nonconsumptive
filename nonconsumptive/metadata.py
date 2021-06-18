@@ -3,6 +3,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
   import nonconsumptive as nc
   from nonconsumptive import Corpus
+
+from typing import DefaultDict, Iterator, Union, Optional, List, Dict, Any
+
 import json
 import pyarrow as pa
 from pyarrow import compute as pc
@@ -17,7 +20,6 @@ import gzip
 from pyarrow import types
 from collections import defaultdict
 import polars as pl
-from typing import DefaultDict, Iterator, Union, Optional, List
 import nonconsumptive as nc
 
 tmpdir = tempfile.TemporaryDirectory
@@ -27,36 +29,28 @@ logger = logging.getLogger("nonconsumptive")
 
 nc_schema_version = 0.1
 
-def cat_from_filenames(corpus: Corpus, path):
-  ids: List[str] = []
-  for (doc, _) in corpus.texts:
-    ids.append(doc)
-  # Not usually done, but necessary here to 
-  # ensure reproducibility across runs
-  # because filenames aren't cached.
-  ids.sort()
-  tb = pa.table({"@id": pa.array(ids, pa.utf8())})
+def cat_from_filenames(input, path):
+  tb = pa.table({"@id": pa.array(input.ids(), pa.utf8())})
   feather.write_feather(tb, path)
 
 class Metadata(object):
-  def __init__(self, corpus: nc.Corpus, raw_file: Path):
+  def __init__(self, corpus, raw_file: Path):
     self.corpus = corpus
     self._tb = None
-    if self.nc_metadata_path.exists():
+    if self.path.exists():
       if raw_file is not None:
-        if self.nc_metadata_path.stat().st_mtime < Path(raw_file).stat().st_mtime:
+        if self.path.stat().st_mtime < Path(raw_file).stat().st_mtime:
           logger.info("Deleting out-of-date NC catalog.")
-          self.nc_metadata_path.unlink()
+          self.path.unlink()
         else:
           return
       else:
         return
     logger.info(f"Creating catalog from {raw_file}.")
-    catalog = Catalog(raw_file, self.nc_metadata_path, identifier = corpus.metadata_options['id_field'])
+    catalog = Catalog(raw_file, self.path, identifier = corpus.metadata_options['id_field'])
     self._ids = None
     logger.info(f"Saving metadata ({len(catalog.nc_catalog)} rows)")
-    feather.write_feather(catalog.nc_catalog, self.nc_metadata_path)
-#    self.load_processed_catalog()
+    feather.write_feather(catalog.nc_catalog, self.path)
   
   @property
   def ids(self) -> pa.Array:
@@ -81,10 +75,10 @@ class Metadata(object):
     pass
 
   def load_processed_catalog(self, columns = ["@id"]):
-    self._tb = feather.read_table(self.nc_metadata_path, columns = columns)
+    self._tb = feather.read_table(self.path, columns = columns)
   
   @property
-  def nc_metadata_path(self):
+  def path(self):
     return Path(self.corpus.root / "nonconsumptive_catalog.feather")
 
   """
@@ -141,7 +135,7 @@ class Metadata(object):
 
     logger.info("Reading full catalog")
 
-    tab = ipc.open_file(self.nc_metadata_path)
+    tab = ipc.open_file(self.path)
     logger.debug(f"read file with schema {tab.schema.names}")
 
     writers = dict()
@@ -152,7 +146,7 @@ class Metadata(object):
       logging.debug(f"ingesting metadata batch {i}, {written_meta} items written total.")
       dict_tables = set()
 
-      tables = defaultdict(dict)
+      tables : Dict[str, dict] = defaultdict(dict)
       tables['fastcat']['_ncid'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
       tables['catalog']['_ncid'] = tables['fastcat']['_ncid']
       for name, col in zip(batch.schema.names, batch.columns):
@@ -166,14 +160,22 @@ class Metadata(object):
           tables['fastcat'][f'{name}__id'] = col.indices   
           tables['catalog'][name] = col.dictionary.take(col.indices)
         elif pa.types.is_list(col.type):
-          logger.warning("Skipping list ", name)
+          tname = name
+          parents = col.value_parent_indices()
+          tables[tname]['_ncid'] = batch['_ncid'].take(parents)
+          flat = col.flatten()
+          if pa.types.is_dictionary(col.type):
+            dict_tables.add(name)
+            tables[tname][tname + "__id"] = flat.indices()
+          else:
+            tables[tname][tname] = flat
         else:
           logger.error("WHAT IS ", name)
           raise
       for table_name in tables.keys():
         loc_batch = pa.table(tables[table_name])
         if not table_name in writers:
-          writers[table_name] = parquet.ParquetWriter(outpath  / (table_name + ".parquet"), loc_batch.schema)
+          writers[table_name] = parquet.ParquetWriter(outpath / (table_name + ".parquet"), loc_batch.schema)
         writers[table_name].write_table(loc_batch)
       written_meta += len(batch)
 
@@ -199,13 +201,13 @@ def infer_id_field(tb: pa.Table) -> str:
     if field.name in default_names:
       return field.name
   raise NameError("No columns named '@id', 'id' or 'filename' in data; please manually set an id for each document.")
-
+"""
 def ingest_json(file:Path) -> pa.Table:
 
-    """
+    ""
     JSON ingest includes some error handling for values with inconsistent encoding as 
     arrays or strings.
-    """
+    ""
 
     try:
         return pa.json.read_json(file)
@@ -216,7 +218,7 @@ def ingest_json(file:Path) -> pa.Table:
             bad_col = match.groups()[0]
             wrap_arrays_as_column(file, [str(bad_col)], "tmp.ndjson")
             return ingest_json("tmp.ndjson")
-        
+"""        
 def wrap_arrays_as_column(ndjson_file, columns, new_dest):
     import json
     with tmpdir() as d:
@@ -309,11 +311,11 @@ class Catalog():
       elif self.format == ".csv":
         self.load_csv(path)
       elif self.format == ".feather":
-        print(path)
         self.load_feather(path)
 
     def load_feather(self, file):
       self.raw_tb = pa.feather.read_table(file)
+
     def load_ndjson(self, file):
       """
       Read metadata from an ndjson file.
@@ -361,7 +363,7 @@ class Column():
       self._pl = None
       self.name = name
       self.role = role
-      self.meta = {}
+      self.meta : Dict[str, Any] = {}
       self._best_form = None
       if isinstance(data.type, pa.ListType):
         self.parent_list_indices = pa.chunked_array([d.offsets for d in data.chunks])

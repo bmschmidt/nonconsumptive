@@ -1,13 +1,28 @@
 from pathlib import Path
 from .document import Document
 from typing import Callable, Iterator, Union, Optional, List, Tuple
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+  import nonconsumptive as nc
+  from nonconsumptive import Corpus
+
+import pyarrow as pa
+from pyarrow import compute as pc
 import logging
 import gzip
 from pyarrow import feather, ipc
 from .data_storage import Node, BatchIDIndex
 logger = logging.getLogger("nonconsumptive")
 
-class TextInput(Node):
+def input(path, corpus = None, format = "txt", compression=None):
+  path = Path(path)
+  if path.is_dir():
+    return FolderInput(path, format, compression)  
+  if path.full_text_path.exists():
+    return SingleFileInput(path, format, compression)
+  raise NotImplementedError("No such file")
+
+class TextInput():
   """
   An object that defines a method for iterating across documents
   linked to IDs.
@@ -17,29 +32,15 @@ class TextInput(Node):
   AND I DON'T KNOW HOW TO ENFORCE THIS!
   """
   def __init__(self, corpus):
-    super().__init__(corpus)
+    self.corpus = corpus
 
-  def _iter_documents(self):
-    raise NotImplementedError("No documents method defined.")
-
-  def __getitem__(self):
+  def __getitem__(self, key):
     raise NotImplementedError("This text input type does not support random item access.")
 
-  def __iter__(self) -> Iterator[Tuple[str, str]]:
-    """
-    The texts iterate over the documents in order
-    and stash the ids somewhere.
-    """
-    if self.corpus._metadata is not None:
-      with BatchIDIndex(self.corpus) as batch_ids:
-        create_ids = not batch_ids.exists()
-        for id, text in self._iter_documents():
-          if create_ids:
-            batch_ids.push(id)
-          yield id, text
-    else:
-      for id, text in self._iter_documents():
-        yield id, text
+  def iter_texts_for_ids(self, ids):
+    for id in ids:
+      id = id.as_py()
+      yield self[id]
 
 class SingleFileInput(TextInput):
   __doc__ = """
@@ -49,22 +50,34 @@ class SingleFileInput(TextInput):
 
   """
   def __init__(self,
-        corpus: 'Corpus',
-        compression: Optional[str] = None,
-        dir:Path = Path("input.txt"),
-        format: str = "txt"):
+    dir:Path = Path("input.txt"),
+    corpus: Optional["Corpus"] = None,
+    compression: Optional[str] = None,
+    format: str = "txt"):
 
     self.format = format
     self.compression = compression
     self.dir = dir
     super().__init__(corpus)
 
+  def _offset_cache(self):
+    pass
+
+  def __getitem__(self, key):
+    logger.warning("STOPGAP BEING USED FOR GETITEM")
+    for id, text in self._iter_documents():
+      if id == key:
+        return text
+    raise KeyError("Can't find")
+
   def _iter_documents(self) -> Iterator[Tuple[str, str]]:
     errored = []
-    opener: function = open
+    opener : function = open
     if self.compression == "gz":
-      opener = lambda x: gzip.open(x, 'rt')
-    for line in opener(self.corpus.full_text_path):
+      file = gzip.open(self.dir, 'rt')
+    else:
+      file = open(self.dir)
+    for line in file:
       try:
         id, text = line.split("\t", 1)
         yield id, text
@@ -82,49 +95,95 @@ class FolderInput(TextInput):
   Ids are taken from filenames with ".txt.gz" removed.
   """
   def __init__(self,
-        corpus: "Corpus",
-        compression: Optional[str] = None):
-    self.format = corpus.format
+      dir: Path,
+      corpus: "Corpus" = None,
+      format:str = "txt",
+      compression: Optional[str] = None):
+    assert isinstance(dir, Path)
+    self.format = format
     self.corpus = corpus
-    self.compression = corpus.compression
-    self.dir = corpus.full_text_path
+    self.compression = compression
+    self.dir = dir
     self.suffix = "." + self.format
     if self.compression:
       self.suffix += f".{compression}"
     super().__init__(corpus)
 
-  def documents(self) -> Iterator[Document]:
-    glob = f"**/*{self.suffix}"
-    assert(self.dir.exists())
-    for f in self.dir.glob(glob):
-      yield Document(self.corpus, path = f)
+  def __iter__(self):
+    for id in self.ids():
+      yield self[id]
 
   def __getitem__(self, key):
-    return Document(self.corpus, path = self.dir / f"{key}{self.suffix}")
+    path = self.dir / f"{key}{self.suffix}"
+    if self.compression == "gz":
+      return gzip.open(path, 'rt').read()
+    elif self.compression is None:
+      return path.open().read()
+    raise NotImplementedError("No method for " + self.compression)
 
-  def _iter_documents(self) -> Iterator[Tuple[str, str]]:
-    for doc in self.documents():
-      id = doc.id
-      yield id, doc.full_text
+  def ids(self):
+    for file in walk_path(self.dir):
+      name = file.name
+      if self.suffix in name:
+        yield name.replace(self.suffix, "")
+
+def walk_path(path):
+  # Sort to preserve consistent order
+  assert isinstance(path, Path)
+  children = [*Path(path).iterdir()]
+  children.sort()
+  for p in children:
+    if p.is_dir(): 
+        yield from walk_path(p)
+        continue
+    yield p.resolve()
+
+class PandocInput(TextInput):
+  def __init__(self,       
+      dir: Path,
+      corpus: "Corpus" = None,
+      format:str = "md",
+      compression: Optional[str] = None):
+      super().__init__(corpus)
+
+  def __iter__(self):
+    pass
 
 class MetadataInput(TextInput):
   __doc__ = """
   For cases when the full text is stored inside the 
   metadata itself--as in common in, for example, social media datasets.
 
-  Rather than parse multiple times, the best practice here is to convert to 
+  Rather than expensively parse multiple times, the best practice here is to convert to 
   feather *once* and then extract text and ids from the metadata column.
   """
-  def __init__(self, corpus: "Corpus"):
-    self.corpus = corpus
-    self.text_field = corpus.text_field
+  def __init__(self, path, text_field = "@text", corpus = None, **kwargs):
+    self.text_field = text_field
+    self.path = path
+    self._tb = None
     super().__init__(corpus)
 
-  def __iter__(self) -> Iterator[Tuple[str, str]]:
-    fin = self.corpus.metadata.nc_metadata_path
-    table = feather.read_table(fin, columns = ['@id', self.text_field])
-    table = ipc.open_file(self.corpus.root / "nonconsumptive_catalog.feather")
-    for i in range(table.num_record_batches):
-      batch = table.get_batch(i)
-      for id, text in zip(batch['@id'], batch[self.text_field]):
-        yield id.as_py(), text.as_py()
+  def iter_texts_for_ids(self, ids) -> Iterator[str]:
+    indices = pc.index_in(ids, value_set = self.tb["@id"])
+    for index in indices:
+      yield self.tb[self.text_field][index.as_py()].as_py()
+
+  @property
+  def tb(self):
+    if self._tb is not None:
+      return self._tb
+    self._tb = feather.read_table(self.path, columns = [self.text_field, "@id"])
+    return self._tb
+    
+  def ids(self) -> Iterator[str]:
+    if self.corpus.uuid is None:
+      for id in self._tb["@id"]:
+        yield id.as_py()
+    else:
+      for id in feather.read_table(self.corpus.root / f"bookstacks/{self.corpus.uuid}.feather")['@id']:
+        yield id
+
+  def __iter__(self) -> Iterator[str]:
+    for text in feather.read_table(self.path, columns = [self.text_field])[self.text_field]:
+      yield text.as_py()
+    
