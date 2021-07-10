@@ -37,6 +37,7 @@ class Metadata(object):
   def __init__(self, corpus, raw_file: Path):
     self.corpus = corpus
     self._tb = None
+    self._ids = None
     if self.path.exists():
       if raw_file is not None:
         if self.path.stat().st_mtime < Path(raw_file).stat().st_mtime:
@@ -48,7 +49,6 @@ class Metadata(object):
         return
     logger.info(f"Creating catalog from {raw_file}.")
     catalog = Catalog(raw_file, self.path, identifier = corpus.metadata_options['id_field'])
-    self._ids = None
     logger.info(f"Saving metadata ({len(catalog.nc_catalog)} rows)")
     feather.write_feather(catalog.nc_catalog, self.path)
   
@@ -406,7 +406,8 @@ class Column():
         return self.c.cast(pa.date32())
       datelike_share = pc.mean(pc.match_substring_regex(self.c, "[0-9]{3,4}-[0-1]?[0-9]-[0-3]?[0-9]").cast(pa.int8()))
       if pc.greater(datelike_share, pa.scalar(.95)).as_py():
-        return self.pl.str_parse_date(pl.datatypes.Date32, "%Y-%m-%d").to_arrow()
+        series = pl.Series.parse_date("date", self.pl, pl.datatypes.Date32, "%Y-%m-%d")
+        return series.to_arrow()
       else:
         raise ValueError(f"only {datelike_share} of values look like a date string.")
 

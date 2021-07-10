@@ -3,15 +3,34 @@ from pathlib import Path
 import pandas as pd
 from nonconsumptive import Corpus
 import pyarrow as pa
+from pyarrow import compute as pc
 
 @pytest.fixture(scope="function")
 def simple_corpus(tmpdir_factory):
     dir = Path(str(tmpdir_factory.mktemp("testing")))
     return Corpus(texts = Path('tests', 'corpora', 'test1', 'texts'), 
-                  metadata = None,
-                  dir = dir, cache_set = {})
+                  metadata = None,   dir = dir, cache_set = {})
 
-class TestCorpus():
+
+class TestTables():
+    def test_documents_table(self, simple_corpus):
+        p = simple_corpus.table("text")        
+        assert len(p) == 3
+        assert p['text']
+
+    def test_tokenization_table(self, simple_corpus):
+        tb = simple_corpus.table("tokenization")   
+        assert len(tb) == 3
+        assert 40 < len(pc.list_flatten(tb['tokenization'])) < 44
+    def test_tokencounts_table(self, simple_corpus):
+        tb = simple_corpus.table("token_counts")   
+        assert len(tb) == 3
+        as_rows = tb.to_pandas()['token_counts'].explode()
+        total = as_rows.apply(lambda x: x['count']).sum()
+
+        assert 43 <= total <= 44
+
+class TestIteration():
     def test_text_iteration(self, simple_corpus):
         ids = []
         texts = []
@@ -25,24 +44,26 @@ class TestCorpus():
         ids = []
         texts = []
         for batch in simple_corpus.tokenization():
-            texts.append(batch['token'].to_pylist())
+            texts.append(batch['tokenization'].values.to_pylist())            
         total = sum(map(len, texts))
         assert 42 <= total <= 43
 
     def test_wordcount_iteration(self, simple_corpus):
         words = []
         total = 0
-        for batch in simple_corpus.token_counts():
-            total += sum(batch['count'].to_pylist())
-            words = words + batch['token'].to_pylist()
+        tb = pa.Table.from_batches([*simple_corpus.token_counts()])
+        words, counts = tb['token_counts'].combine_chunks().flatten().flatten()
+        total = pc.sum(counts).as_py()
+        words = words.to_pylist()
         assert "wife" in words
         assert "каждая" in words
         assert 42 <= total <= 43
 
     def test_document_lengths(self, simple_corpus):
-        lengths = simple_corpus.document_lengths()
-        tab = pa.Table.from_batches([*lengths])
-        assert 42 <= tab.to_pandas()['nwords'].sum() <= 43
+        length = 0
+        tb = pa.Table.from_batches([*simple_corpus.document_lengths()])
+        length = pc.sum(tb['nwords']).as_py()
+        assert 42 <= length <= 43
 
     def test_total_wordcounts(self, simple_corpus):
         counts = simple_corpus.total_wordcounts
@@ -76,13 +97,10 @@ class TestCorpus():
     def test_iterator_refreshes(self, simple_corpus):
         total = 0
         n = 0
-        for batch in simple_corpus.tokenization():
-            n += 1
-        assert n == 3
-        n = 0
-        for batch in simple_corpus.tokenization():
-            n += 1
-        assert n == 3
+        tb = pa.Table.from_batches([*simple_corpus.tokenization()])
+        assert len(tb) == 3
+        tb = pa.Table.from_batches([*simple_corpus.tokenization()])
+        assert len(tb) == 3
 
     def test_encode_wordcounts(self, simple_corpus):
         total = 0
@@ -91,5 +109,5 @@ class TestCorpus():
             total += batch.to_pandas()['count'].sum()
             n += 1
             assert batch.to_pandas().shape[1] == 3
-        assert n == 3
+        assert n == 1
         assert 42 <= total <= 43 # Different tokenizers produce slightly different results.

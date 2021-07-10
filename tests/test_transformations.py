@@ -22,7 +22,7 @@ class TestDocument():
     n = 0
     stack = simple_corpus.bookstacks[0]
     b = stack.get_transform("tokenization")
-    for batch in b:
+    for batch in b.iter_docs():
         n += 1
         pass
     assert n == 3
@@ -33,11 +33,11 @@ class TestDocument():
     
     b = stack.get_transform("tokenization")
 
-    for _ in b:
+    for _ in b.iter_docs():
         n += 1
     assert (n == 3)
 
-    for _ in b:
+    for _ in b.iter_docs():
         n += 1
     assert (n == 6)
 
@@ -45,7 +45,7 @@ class TestDocument():
     total = 0
     n = 0
     stack = simple_corpus.bookstacks[0]    
-    for batch in stack.get_transform("token_counts"):
+    for batch in stack.get_transform("token_counts").iter_docs():
         total += batch.to_pandas()['count'].sum()
         n += 1
         assert batch.to_pandas().shape[1] == 2
@@ -54,7 +54,7 @@ class TestDocument():
 
     total = 0
     n = 0
-    for batch in stack.get_transform("token_counts"):
+    for batch in stack.get_transform("token_counts").iter_docs():
         total += batch.to_pandas()['count'].sum()
         n += 1
         assert batch.to_pandas().shape[1] == 2

@@ -31,6 +31,8 @@ logger = logging.getLogger("nonconsumptive")
 StrPath = Union[str, Path]
 
 class Corpus():
+
+
   def __init__(self, dir: StrPath, texts: Optional[StrPath] = None, 
                metadata: Optional[StrPath] = None,
                cache_set: Optional[Set[str]] = None, 
@@ -141,6 +143,7 @@ class Corpus():
 
   @property
   def total_wordcounts(self) -> pa.Table:
+    logger.debug("Hello")
     if self._total_wordcounts is not None:
       return self._total_wordcounts
     cache_loc = self.root / "wordids.feather"
@@ -148,11 +151,37 @@ class Corpus():
       logger.debug("Loading word counts from cache")
       self._total_wordcounts = feather.read_table(cache_loc)
       return self._total_wordcounts
+
     logger.info("Building word counts")
-    counter = bounter(4096)
-    for token, count in self.iter_over("token_counts"):
-      dicto = dict(zip(token.to_pylist(), count.to_numpy()))
-      counter.update(dicto)
+
+    MAX_MEGABYTES = 4096
+    import bounter
+    counter = bounter.bounter(MAX_MEGABYTES)
+    stack_size = 0
+    stack = []
+    # Do the first pass of counting precisely using polars.
+    # Avoids a bunch of unnecessary typescasts and 
+    # unparallelized additions.
+    for i, bstack in enumerate(self.bookstacks):
+      transform = bstack.get_transform("token_counts")
+      for wordcounts in transform:
+          # First merge the documents; then split words from counts
+          wordcounts = wordcounts['token_counts'].flatten()
+          stack.append(pa.RecordBatch.from_struct_array(wordcounts))
+          stack_size += wordcounts.nbytes
+          # Use one-tenth the stack size to store here.
+          if stack_size >= (MAX_MEGABYTES * 1024 * 1024 / 10) or i == (len(self.bookstacks) - 1):
+            stuck = pl.from_arrow(pa.Table.from_batches(stack))
+            stack = []
+            count = stuck.groupby("token")['count'].sum()
+            del stuck
+            stack_size = 0
+            #logger.info(f"Flushing counts at bookstack {i} size {stack_size / 1024 / 1024:.02f}MB")
+            counter.update(
+              dict(zip(count['token'].to_list(), count['count_sum'].to_list()))
+            )
+            del count
+
     tokens, counts = zip(*counter.items())
     del counter
     tb: pa.Table = pa.table([pa.array(tokens, pa.utf8()), pa.array(counts, pa.uint32())],
@@ -179,6 +208,13 @@ class Corpus():
     wordcounts = self.total_wordcounts
     yield from self.iter_over("encoded_wordcounts")
 
+  def table(self, key):
+    tabs = [stack.get_transform(key).table for stack in self.bookstacks]
+    return pa.concat_tables(tabs)
+
+  def text(self):
+    yield from self.iter_over('text')
+
   def tokenization(self):
     yield from self.iter_over('tokenization')
 
@@ -191,13 +227,21 @@ class Corpus():
   def document_lengths(self):
     yield from self.iter_over('document_lengths')
 
-  def iter_over(self, key):
+
+
+  def iter_over(self, key, ids = None):
     threads = 1
 
     bookstack_queue = Queue(threads)
     results_queue = Queue(threads * 2)
     for stack in self.bookstacks:
-      yield from stack.get_transform(key)
+      transformation = stack.get_transform(key)
+      if ids is None:
+        yield from transformation
+      elif ids in {"@id", "_ncid"}:
+        yield from transformation.iter_with_ids(ids)
+      else:
+        raise ValueError(f'ids must be in {"@id", "_ncid"}')
 
     """
     def feed_stacks():
@@ -238,11 +282,16 @@ class Corpus():
     """
     if self._stacks is not None:
       return self._stacks
+
     self._stacks = []
-    ids = self._create_bookstack_plan(2 ** 8)
+    ids = self._create_bookstack_plan(2 ** 14)
     for id in ids:
       self._stacks.append(Bookstack(self, id))
     return self._stacks
+
+  def audit(self, field):
+    for stack in self.bookstacks:
+      pass
 
   @property
   def wordids(self):
@@ -266,16 +315,25 @@ class Corpus():
     id = self.metadata.tb.column("@id")[i].as_py()
     return Document(self, id)
 
-  def _create_bookstack_plan(self, size = None):
+  def _create_bookstack_plan(self, size = None, force = False):
     if size is None:
       size = 2 ** 16
     dir = self.root / "bookstacks"
     dir.mkdir(exist_ok = True)
+    stack_names = []
+
+    # Attempt to return existing plan.
+    for p in dir.glob("*.feather"):
+      stack_names.append(p.with_suffix("").name)
+    if len(stack_names):
+      stack_names.sort()
+      return stack_names
+
+    # Build a new plan.
     cat = feather.read_table(self.metadata.path, columns = ["@id"])
     ids = cat['@id']
     batch_num = 0
     i = 0
-    stack_names = []
     while i < len(cat):
       top = min(i + size, len(cat))
       slice = ids[i:top]

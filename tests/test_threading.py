@@ -55,22 +55,17 @@ class TestChunkPlan():
 
   def test_chunk_iteration(self, dissertation_corpus):
     dissertation_corpus._create_bookstack_plan(size = 4)
-    t = 0
-    for tokens in dissertation_corpus.tokenization():
-      t += 1
-    assert t == 12
+    tb = pa.Table.from_batches([*dissertation_corpus.tokenization()])
+    assert len(tb) == 12
+
 
   def test_cached_chunk_iteration(self, dissertation_corpus):
     dissertation_corpus._create_bookstack_plan(size = 4)
-    t = 0
-    for tokens in dissertation_corpus.tokenization():
-      t += 1
-    assert t == 12
+    tb = pa.Table.from_batches([*dissertation_corpus.tokenization()])
+    assert len(tb) == 12
 
-    t = 0
-    for tokens in dissertation_corpus.tokenization():
-      t += 1
-    assert t == 12
+    tb = pa.Table.from_batches([*dissertation_corpus.tokenization()])
+    assert len(tb) == 12
 
 class TestChunksSeparately():
   def test_chunk_instantiation(self, dissertation_corpus):

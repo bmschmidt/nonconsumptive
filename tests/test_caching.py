@@ -10,9 +10,8 @@ class TestCaching():
     def test_creates_intermediate(self, tmpdir):
         def number_of_files(corpus):
             counts = []
-            for count in (corpus.token_counts()):
-                counts.append(count)
-            assert len(counts) == 7
+            tb = pa.Table.from_batches([*corpus.token_counts()])
+            assert len(tb) == 7
             ipcs = [*Path(tmpdir).glob("**/*.feather")]
             return len(ipcs)
 

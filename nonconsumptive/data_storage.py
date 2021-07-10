@@ -16,7 +16,6 @@ logger = logging.getLogger("nonconsumptive")
 import types
 from typing import Callable, Iterator, Union, Optional, List, Tuple, Any
 from .utils import ConsumptionError
-
 import SRP
 
 class BatchIDIndex(object):
@@ -123,6 +122,7 @@ class Reservoir(Node):
       raise NameError("There must be a name defined on each reservoir subclass")
     if dir is None:
       dir = bookstack.root / self.name
+    self.bookstack = bookstack
     truedir : Path = Path(dir)
     truedir.mkdir(exist_ok = True)
     self.batch_size = batch_size
@@ -132,15 +132,12 @@ class Reservoir(Node):
 
   def empty(self):
     # Check if any items have been created.
-    if self.uuid:
-      return not (self.path / f"uuid").with_suffix("." + self.format).exists()
+    if self.bookstack.uuid:
+      p = (self.path / self.bookstack.uuid).with_suffix("." + self.format)
+      return not p.exists()
     for _ in self.path.glob(f"**/*.{self.format}"):
       return False
     return True
-
-  def full(self):
-    # Check if every item in the metadata has been created.
-    pass
 
   def build_cache(self):
     raise NotImplementedError("Class does not allow caching.")
@@ -157,16 +154,18 @@ class Reservoir(Node):
 
   def __iter__(self):
     if not self.name in self.corpus.cache_set:
-        yield from self._from_upstream()
+      yield from self._from_upstream()
     elif self.empty():
-      logger.info(f"Building {self.name}")
+      logger.info(f"Now building {self.name}")
       yield from self._iter_and_cache()
     else:
       yield from self._iter_cache()
 
   @property
   def arrow_schema(self):
-      raise NotImplementedError(f"Must define an arrow_schema for type {self.name}")
+    if hasattr(self, "_arrow_schema"):
+      return self._arrow_schema
+    raise NotImplementedError(f"Must define an arrow_schema for type {self.name}")
 
   @property
   def id_map(self):
@@ -178,10 +177,6 @@ class Reservoir(Node):
       for id in ids:
         self._id_map[id] = p
     return self._id_map
-
-class Livestream(Reservoir):
-  format : str = "NOFORMAT"
-      
 
 class ArrowReservoir(Reservoir):
   format : str = "feather"
@@ -223,6 +218,7 @@ class ArrowReservoir(Reservoir):
   def flush_cache(self):
     for batch in self.cache:
       self.writer.write(batch)
+    self.cache = []
     self.bytes = 0
 
   def build_cache(self):
@@ -250,42 +246,79 @@ class ArrowReservoir(Reservoir):
     if self._table is not None:
       return self._table
     fin = self.path / (self.uuid + ".feather")
-    logger.info(f"Loading upstream feather table from {fin}")
-    self._table = feather.read_table(fin)
+    logger.debug(f"Loading upstream feather table from {fin}")
+    try:
+      self._table = feather.read_table(fin)
+    except pa.ArrowInvalid:
+      fin.unlink()
+      self.build_cache()
+      self._table = feather.read_table(fin)
+    except FileNotFoundError:
+      self.build_cache()
+      self._table = feather.read_table(fin)
     return self._table
 
   def _iter_cache(self) -> Iterator[pa.RecordBatch]:
+    i = 0
     for batch in self.table.to_batches():
+      i += 1
       yield batch
 
 class ArrowLineChunkedReservoir(ArrowReservoir):
   def iter_with_ids(self, id_type = "@id"):
     ids = self.bookstack.ids[id_type]
     ix = 0
-    for batch in super().__iter__():
+    for i_, batch in enumerate(super().__iter__()):
       n_here = len(batch)
       ids_here = ids[ix:ix + n_here]
       ix += n_here
       cols = [ids_here]
-      for i,name in enumerate(batch.schema.names):
+      for i, name in enumerate(batch.schema.names):
         cols.append(batch.column(i))
-      tab = pa.table(cols, [id_type, *batch.schema.names]).combine_chunks()
+      try:
+        tab = pa.table(cols, [id_type, *batch.schema.names])
+        tab = tab.combine_chunks()
+      except:
+        logger.error(f"Error on batch {i_} {self.bookstack.uuid} length {n_here} with ids length {len(ids)} {ids[:10]}")
+        logger.error(batch.to_pandas())
+        raise
       yield from tab.to_batches()
+      
+  def iter_docs(self):
+    for batch in self:
+      names = [f.name for f in batch.schema]
+      for i in range(len(batch)):
+        yield {name: batch[name][i] for name in names}
+#  def __iter__(self):
+#    yield from self.iter_with_ids()
 
-  def __iter__(self):
-    yield from self.iter_with_ids()
-
-class ArrowIDChunkedReservoir(ArrowReservoir):
+class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
+  
   """
-  An arrow reservoir where each record batch corresponds to a single uuid
-  in the order documented at {root}/build/bookstack_index/{uuuid}.feather. Allows for fast iteration without the
-  overhead of actually passing the ids through the pipeline.
+
+  One document per row, with some additional guarantees:
+
+  1. There is a single column, identified by self.name
+  2. That column may be a struct.
+  3. There is an upstream_arrays function that yields
+     individual arrays.
+  4. There is a process_batch function of type array -> array that
+     generates individual column elements 
+  
   """
 
   def __init__(self, origin, *args, **kwargs):
     assert hasattr(origin, "is_bookstack")
     self._upstream : Optional[Iterator[Any]] = None
+    # May fill _upstream.
     super().__init__(origin, *args, **kwargs)
+
+  @property
+  def arrow_schema(self):
+    # The schema is a list of whatever the base_type here is.
+    return pa.schema({
+      self.name: pa.list_(self.base_type)
+    })
 
   def process_batch(self, batch: pa.RecordBatch) -> pa.RecordBatch:
     raise NotImplementedError("Must define a batch -> batch method")
@@ -296,29 +329,58 @@ class ArrowIDChunkedReservoir(ArrowReservoir):
     else:
       raise
 
-  def iter_alongside_ids(self, id_type = "@id") -> Iterator[Tuple[str, pa.RecordBatch]]:
-    # Iterate
-    for id, batch in zip(self.bookstack.ids[id_type], self):
-      yield id, batch
+  def upstream_arrays(self) -> Iterator[pa.Array]:
+    # Yields one array per document.
+    for batch in self.upstream():
+      col_1 = batch.columns[0]
+      for row in col_1:
+        # Coerce to an array type.
+        yield row.values
 
-  def iter_with_ids(self, id_type = "@id"):
-    if id_type == "_ncid":
-      dtype = pa.uint32()
-    else:
-      dtype = pa.string()
-    new_schema = self.arrow_schema.insert(0, pa.field(id_type, dtype))
-    # TODO: zip(strict=True) when only py 3.10 or later is supported?
-    for id, batch in zip(self.bookstack.ids[id_type], self):
-      id_list = np.full(len(batch), id.as_py())
-      id = pa.array(id_list, dtype)
-      yield pa.RecordBatch.from_arrays(
-        [id, *batch.columns],
-        schema = new_schema
-        )
 
   def _from_upstream(self) -> Iterator[pa.RecordBatch]:
-    for batch in self.upstream():
-      yield self.process_batch(batch)
+    rows : List[List[pa.Array]] = []
+    row_offsets = [0]
+    cache_size = 0
+    for array in self.upstream_arrays():
+      value = self.process_batch(array)
+      rows.append(value)
+      row_offsets.append(row_offsets[-1] + len(value))      
+      cache_size += value.nbytes
+      if cache_size > self.bookstack.TARGET_BATCH_SIZE:
+        values = pa.chunked_array(rows).combine_chunks()
+        offsets = pa.array(row_offsets, pa.int32())
+        batch = pa.RecordBatch.from_arrays(
+          [pa.ListArray.from_arrays(offsets, values)],
+          [self.name]
+        )
+        rows = []
+        cache_size = 0
+        yield batch
+    values = pa.chunked_array(rows).combine_chunks()
+    offsets = pa.array(row_offsets, pa.int32())
+    yield pa.RecordBatch.from_arrays(
+      [pa.ListArray.from_arrays(offsets, values)],
+      [self.name]
+    )
+
+  def iter_docs(self):
+    for batch in self:
+      for row in batch[self.name]:
+        yield pa.record_batch(row.values.flatten(), [m.name for m in self.base_type])
+
+  def iter_with_ids(self, id = "_ncid"):
+    # Slap an ID in front of the list.
+    ids = self.bookstack.ids[id]
+    offset = pa.scalar(0, pa.int32())
+
+    for batch in self:
+      indices = batch[self.name].value_parent_indices()      
+      ids = pc.take(ids, pc.add(indices, offset))
+      offset = pc.add(offset, pa.scalar(len(batch)))
+      batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
+      yield pa.record_batch([indices, *batch.columns],
+             [id, *[f.name for f in batch.schema]])
 
 class SRP_set(ArrowReservoir):
   """ 
