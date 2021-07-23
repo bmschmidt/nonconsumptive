@@ -2,15 +2,16 @@
 
 Rich collections of digital text consist of text and metadata.
 
-This package provides a fast, simple set of tools for sharing and reading texts
-nonconsumptively.
+This package provides a fast, simple set of tools for sharing stacks of text--
+not just single document, but full-on libraries and collections including
+as much textual information as you're willing to share.
+
+It's designed to serve two different audiences.
 
 1. Researchers who want to *work* with nonconsumptive data, either as their
    only source or as a supplement to other methods.
 2. Scholars, librarians, and others who want *distribute* information about texts
    in their collections nonconsumptively.
-
-
 
 Some of the tasks this library is designed to support include:
 
@@ -24,9 +25,24 @@ Some of the tasks this library is designed to support include:
 
 ## Motivation
 
+To quote the [Santa Barbara statement on collections as data](https://collectionsasdata.github.io/statement/):
+> By conceiving of, packaging, and making collections available as data,
+ cultural heritage institutions work to expand the set of possible opportunities for engaging with collections.
 
-The Santa Barbara statement on collections as data says "<>".
+The more abstract and computer-friendly the ways a collection is distributed,
+ironically, the more different channels for human engagement it can have.
 
+I've built this right now largely to replace a backend for one specific purpose;
+serving interactive visualizations of wordcounts. But as the feature counts
+distributed the HathiTrust research center have shown, these kinds of nonconsumptive
+representations can have all sorts of uses.
+
+## Formats
+
+Humanists tend to fetishize unicode-formatted `.txt` files, often distributing
+files as JSON. Internally, this library is fast because it uses instead the
+emerging standards for batched, columnar binary data processing from the Apache
+foundation, "Arrow" and "Parquet."
 
 ## Flow
 
@@ -43,7 +59,7 @@ schema ----/
 
 ## Principles
 
-* **Differential disclosure.** Open is great, closed is great, halfway open is great. If you want to start a project off only metadata disclosure, then scale it up to vectorized features 
+* **Differential disclosure.** Open is great, closed is great, halfway open is great. If you want to start a project off only metadata disclosure, then scale it up to vectorized features
 with your first publication, and finish up with counts of trigrams after the book
 comes out; great. Take your time. We'll still be here.
 * **Format flexibility.** There are a lot of ways that make sense to distribute a collection of texts. Some people do it is
@@ -51,7 +67,7 @@ as a giant text file with tabs. Some people have zip files. Some people
 have TEI with insanely well marked up paragraphs. All of these are appropriate
 for different purposes; all allow different sorts of representation.
 * **Metadata is as important as data** Machine learning frameworks for text
-tend to treat corpora as texts alone, but reasonably organized metadata from 
+tend to treat corpora as texts alone, but reasonably organized metadata from
 the library world are just as essential a component as well tokenized text.
 Linked open data, on the other hand, is usually distributed in forms that
 researchers ignore because it scales so poorly to columnar representations. The
@@ -64,10 +80,10 @@ to information-conserving bigrams.
 * **English language fifth.** All operations take place on Unicode here. No
 flexibility for your old Latin-1 files. But also, let's take advantage of
 the fact that lots of humanistic data doesn't fit so great into that
-language model you trained on Wikipedia, and come up with context-agnostic 
-representations of language. No features should be added that specifically 
-target English if they don't exist for four other languages--including at least 
-one of Arabic, Chinese, Hindi, Russian, or Turkish--first. 
+language model you trained on Wikipedia, and come up with context-agnostic
+representations of language. No features should be added that specifically
+target English if they don't exist for four other languages--including at least
+one of Arabic, Chinese, Hindi, Russian, or Turkish--first.
 
 ## Speed.
 
@@ -75,7 +91,7 @@ Working with large collections of can be slow.
 This library deploys the Apache Arrow format for binary storage to pass data
 between processes to allow fast serialization, deserialization, and storage.
 
-Different file formats used for different purposes. 
+Different file formats used for different purposes.
 
 1. All *internal* interchange--including caches--uses the IPC Apache Arrow
    format (AKA, "feather").
@@ -87,8 +103,8 @@ Different file formats used for different purposes.
 ### Caching
 
 In general, caching helps speed on these tasks, although you can take it too far.
-The default arguments will cache token counts of various forms. But it's 
-possible to stream straight into a binary-encoded format if you like, and 
+The default arguments will cache token counts of various forms. But it's
+possible to stream straight into a binary-encoded format if you like, and
 it's also possible to cache the tokenizations which may make bigram and trigram
 creation easier.
 
@@ -128,11 +144,11 @@ the precise bounds have not been delimited.
 Nonconsumptive reading is about avoiding legal issues involving copyright and
 ethical issues involving the ownership rights of authors over their texts.
 There are many bad things you can do with text that don't violate copyright law.
-Some of these may be illegal and unethical. (Distributing unigram counts of 
-medical records would probably violate 
-[HIPAA regulations](https://www.hhs.gov/hipaa/index.html). 
-Others may be legal but unethical. (Do not build data visualizations that dox 
-members of online communities.) Others may be ethical but illegal. 
+Some of these may be illegal and unethical. (Distributing unigram counts of
+medical records would probably violate
+[HIPAA regulations](https://www.hhs.gov/hipaa/index.html).
+Others may be legal but unethical. (Do not build data visualizations that dox
+members of online communities.) Others may be ethical but illegal.
 (Be careful whose website you scrape.) I don't really know what to tell you
 to do. I generally don't think we have ethical obligations towards the dead,
 but what do I know?
