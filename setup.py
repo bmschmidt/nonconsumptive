@@ -15,6 +15,10 @@ setup(name='nonconsumptive',
           "pyyaml",
           "bounter"
       ],
-    
+        entry_points={
+        'console_scripts': [
+            'nonconsumptive = nonconsumptive.commander:main'
+        ],
+    },
       zip_safe=False
 )

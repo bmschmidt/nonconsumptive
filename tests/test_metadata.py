@@ -11,6 +11,8 @@ import json
 
 @pytest.fixture(scope="session")
 def corrected_dissertations(tmpdir_factory):
+  # This cleans it up a bit in a way that isn't fair, but will let some tests
+  # pass before we try the hard ones.
   fn = tmpdir_factory.mktemp("ndjson").join("catalog.ndjson")
   with open(fn, "w") as fout:
     for line in open("tests/catalogs/dissertations.ndjson"):
@@ -21,13 +23,21 @@ def corrected_dissertations(tmpdir_factory):
       fout.write(json.dumps(d) + "\n")
   return Path(str(fn))
 
+@pytest.fixture(scope="function")
+def tmp_feather(tmpdir_factory):
+  # A temporary feather file path.
+  fn = tmpdir_factory.mktemp("tmp").join("tmp.feather")
+  path = Path(str(fn))
+  if path.exists():
+    path.unlink()
+  return path
 
 @pytest.fixture(scope="function")
 def dissertation_corpus(corrected_dissertations, tmpdir):
   return Corpus(texts = None,
             metadata = corrected_dissertations,
             dir = tmpdir,
-            text_options = {"text_field" : "dissertation"})
+            text_options = {"metadata_field" : "dissertation"})
 
 @pytest.fixture(scope="function")
 def non_metadata_corpus(tmpdir_factory):
@@ -52,7 +62,7 @@ class TestMetadata():
     first_pass = Corpus(texts = None,
             metadata = corrected_dissertations,
             dir = path,
-            text_options = {"text_field" : "dissertation"})
+            text_options = {"metadata_field" : "dissertation"})
     tb = first_pass.metadata.tb
     assert len(tb) == 12
     persisted_data = feather.read_table(path / "nonconsumptive_catalog.feather")
@@ -67,7 +77,7 @@ class TestMetadata():
     should_use_cache = Corpus(texts = None,
             metadata = corrected_dissertations,
             dir = path,
-            text_options = {"text_field" : "@id"})
+            text_options = {"metadata_field" : "@id"})
     tb = should_use_cache.metadata.tb
     assert len(tb) == 1
 
@@ -84,7 +94,7 @@ class TestMetadata():
             metadata = path / "input.feather",
             dir = tmpdir / "3",
             metadata_options = {"id_field": "alt_id_title"},
-            text_options = {"text_field" : "dissertation"})
+            text_options = {"metadata_field" : "dissertation"})
 
     c = corp.metadata.tb['@id']
     assert len(c) > 7
@@ -106,8 +116,13 @@ class TestCatalog():
       cat = Catalog(Path("tests/catalogs/dissertations.ndjson"), Path(str(tmpdir)) / "test.feather")
       p = cat.nc_catalog
 
-  def test_ndjson(self, corrected_dissertations):
+  def test_ndjson(self, corrected_dissertations, tmpdir):
     cat = Catalog(Path(corrected_dissertations), Path(str(tmpdir)) / "test.feather")
     nc = cat.nc_catalog      
     assert pa.types.is_list(nc['keywords'].type)
     assert pa.types.is_integer(nc['year'].type)
+  
+  def test_ia_catalog(self, tmp_feather):
+    cat = Catalog("tests/catalogs/ia.ndjson.gz", tmp_feather)
+    parsed = cat.nc_catalog
+    return

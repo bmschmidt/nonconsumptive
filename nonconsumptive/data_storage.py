@@ -7,8 +7,6 @@ from pyarrow import compute as pc
 import pyarrow as pa
 import json
 import yaml
-import numpy as np
-from numpy import packbits
 import logging
 import nonconsumptive as nc
 
@@ -101,7 +99,7 @@ class Reservoir(Node):
   def __init__(self,
     bookstack,
     dir:Union[None, str, Path] = None,
-    batch_size:int = 1024 * 1024 * 512,
+    batch_size:int = 1024 * 1024 * 256,
     number:int = 0
     ):
     """
@@ -156,7 +154,7 @@ class Reservoir(Node):
     if not self.name in self.corpus.cache_set:
       yield from self._from_upstream()
     elif self.empty():
-      logger.info(f"Now building {self.name}")
+      logger.info(f"Now building {self.name} {self.uuid}")
       yield from self._iter_and_cache()
     else:
       yield from self._iter_cache()
@@ -181,7 +179,7 @@ class Reservoir(Node):
 class ArrowReservoir(Reservoir):
   format : str = "feather"
 
-  def __init__(self, *args, max_size: int = 2 ** 20 * 128, **kwargs):
+  def __init__(self, *args, max_size: int = 1024 * 1024 * 128, **kwargs):
     """
     max_size: max size of objects to cache in memory.
     """
@@ -194,9 +192,14 @@ class ArrowReservoir(Reservoir):
     super().__init__(*args, **kwargs)
 
   @property
+  def filepath(self):
+    # Where the feather file should live.
+    return self.path / (self.uuid + ".feather")
+
+  @property
   def writer(self):
     if self._writer is None:
-      path = self.path / (self.uuid + ".feather")
+      path = self.filepath
       fout = pa.ipc.new_file(path, schema = pa.schema(self.arrow_schema), 
       options=pa.ipc.IpcWriteOptions(compression = "zstd"))
       self._writer = fout
@@ -216,9 +219,11 @@ class ArrowReservoir(Reservoir):
       self._writer = None
     
   def flush_cache(self):
-    for batch in self.cache:
-      self.writer.write(batch)
+    # Combine all record batches into a single batch and flush.
+    tab = pa.Table.from_batches(self.cache).combine_chunks()
+    # Deallocate just in case.
     self.cache = []
+    self.writer.write(tab)
     self.bytes = 0
 
   def build_cache(self):
@@ -245,7 +250,7 @@ class ArrowReservoir(Reservoir):
   def table(self) -> pa.Table:
     if self._table is not None:
       return self._table
-    fin = self.path / (self.uuid + ".feather")
+    fin = self.filepath
     logger.debug(f"Loading upstream feather table from {fin}")
     try:
       self._table = feather.read_table(fin)
@@ -283,7 +288,7 @@ class ArrowLineChunkedReservoir(ArrowReservoir):
         logger.error(batch.to_pandas())
         raise
       yield from tab.to_batches()
-      
+
   def iter_docs(self):
     for batch in self:
       names = [f.name for f in batch.schema]
@@ -298,11 +303,11 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
 
   One document per row, with some additional guarantees:
 
-  1. There is a single column, identified by self.name
+  1. There is a single column, identified by self.name (namespaced as nc:token_counts, etc.).
   2. That column may be a struct.
   3. There is an upstream_arrays function that yields
      individual arrays.
-  4. There is a process_batch function of type array -> array that
+  4. There is a process_batch function of type array -> [array/structArray] that
      generates individual column elements 
   
   """
@@ -315,13 +320,22 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
 
   @property
   def arrow_schema(self):
-    # The schema is a list of whatever the base_type here is.
-    return pa.schema({
-      self.name: pa.list_(self.base_type)
-    })
+    # If the base type is listy, the sc
+    if pa.types.is_list(self.base_type) or pa.types.is_fixed_size_list(self.base_type):
+      return pa.schema({self.name: self.base_type})
+    if pa.types.is_struct(self.base_type):
+      # The schema is a list of whatever the base_type here is.
+      return pa.schema({
+        self.name: pa.list_(self.base_type)
+      })
+    raise NotImplementedError(f"Unable to create line-by-line records for returned value of type {self.base_type}")
 
   def process_batch(self, batch: pa.RecordBatch) -> pa.RecordBatch:
     raise NotImplementedError("Must define a batch -> batch method")
+
+  @property
+  def base_type(self) -> pa.Type:
+    raise NotImplementedError("Must define a base_type for each element.")
 
   def upstream(self):
     if self._upstream:
@@ -337,11 +351,11 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
         # Coerce to an array type.
         yield row.values
 
-
   def _from_upstream(self) -> Iterator[pa.RecordBatch]:
     rows : List[List[pa.Array]] = []
     row_offsets = [0]
     cache_size = 0
+    # To grow the array, we append to a list in place. 
     for array in self.upstream_arrays():
       value = self.process_batch(array)
       rows.append(value)
@@ -350,17 +364,26 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
       if cache_size > self.bookstack.TARGET_BATCH_SIZE:
         values = pa.chunked_array(rows).combine_chunks()
         offsets = pa.array(row_offsets, pa.int32())
+        if pa.types.is_fixed_size_list(self.base_type):
+          l = pa.FixedSizeListArray.from_arrays(values, self.base_type.list_size)
+        else:
+          l = pa.ListArray.from_arrays(offsets, values)
         batch = pa.RecordBatch.from_arrays(
-          [pa.ListArray.from_arrays(offsets, values)],
+          [l],
           [self.name]
         )
         rows = []
         cache_size = 0
+        row_offsets = [0]
         yield batch
     values = pa.chunked_array(rows).combine_chunks()
     offsets = pa.array(row_offsets, pa.int32())
+    if pa.types.is_fixed_size_list(self.base_type):
+      l = pa.FixedSizeListArray.from_arrays(values, self.base_type.list_size)
+    else:
+      l = pa.ListArray.from_arrays(offsets, values)
     yield pa.RecordBatch.from_arrays(
-      [pa.ListArray.from_arrays(offsets, values)],
+      [l],
       [self.name]
     )
 
@@ -373,70 +396,16 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
     # Slap an ID in front of the list.
     ids = self.bookstack.ids[id]
     offset = pa.scalar(0, pa.int32())
-
     for batch in self:
       indices = batch[self.name].value_parent_indices()      
-      ids = pc.take(ids, pc.add(indices, offset))
-      offset = pc.add(offset, pa.scalar(len(batch)))
-      batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
+      try:
+        ids = pc.take(ids, pc.add(indices, offset))
+        offset = pc.add(offset, pa.scalar(len(batch)))
+        batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
+      except pa.ArrowIndexError:
+        print(offset)
+        print(pc.add(indices, offset))
+        print(len(ids))
+        raise
       yield pa.record_batch([indices, *batch.columns],
              [id, *[f.name for f in batch.schema]])
-
-class SRP_set(ArrowReservoir):
-  """ 
-  Embed a set of tokencounts into a fixed high-dimensional
-  space for comparisons. You've got to persist this to disk, because it 
-  would be a gratuitous waste of energy not to and I'm not cool with that.
-  """
-  name = "SRP"
-  schema = pa.schema({
-    "SRP": pa.list_(pa.float32(), int(1280)),
-    "SRP_bits": pa.binary(int(1280) // 8)
-  })
-
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    if not "SRP" in self.corpus.cache_set:
-      logger.warning("Adding SRP to cache set")
-      self.corpus.cache_set.add("SRP")
-
-  def _from_upstream(self) -> Iterator[pa.RecordBatch]:
-    # Yields 1-row batches. These can be assembled later into longer ones; the 
-    # SRP step is expensive enough that it's NBD to wait.
-
-    hasher = SRP.SRP(dim = int(1280), cache = True)
-    for batch in self.bookstack.get_transform("token_counts"):
-      # At a first pass, 
-      tokens = batch['token'].to_pylist()    
-      counts = batch['count'].to_numpy()
-      hash_rep = hasher.stable_transform(words = tokens, counts = counts)
-      bit_rep = packbits(hash_rep > 0).tobytes()
-      yield pa.record_batch([
-          pa.array([id], self.arrow_schema[0].type),
-          pa.array([hash_rep], self.arrow_schema[1].type),
-          pa.array([bit_rep], self.arrow_schema[2].type)
-      ])
-
-  def build_cache(self, max_size = 5e08, max_files = 1e06):
-    """
-
-    max_size:  Max size of reservoir files, in bytes.
-    max_files: Max documents in a single reservoir file.
-    """
-
-    logger.info("Building cache")
-    sink = self.open_writer()
-    for batch in self._from_upstream():
-      assert(batch.schema.metadata)
-      yield batch
-      sink.write_batch(batch)
-      self.batches += 1
-      self.bytes += batch.nbytes
-      if self.bytes > max_size or self.batches > max_files:
-        sink.close()
-        self.flush_ids()
-        sink = self.open_writer()
-        self.batches = 0
-    sink.close()
-    self.flush_ids()
-

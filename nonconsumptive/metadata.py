@@ -21,10 +21,10 @@ from pyarrow import types
 from collections import defaultdict
 import polars as pl
 import nonconsumptive as nc
-
-tmpdir = tempfile.TemporaryDirectory
-
+import regex as re
 import logging
+from .bookstack import Athenaeum
+
 logger = logging.getLogger("nonconsumptive")
 
 nc_schema_version = 0.1
@@ -34,10 +34,11 @@ def cat_from_filenames(input, path):
   feather.write_feather(tb, path)
 
 class Metadata(object):
-  def __init__(self, corpus, raw_file: Path):
+  def __init__(self, corpus, raw_file: Path, id_field : Optional[str] = None):
     self.corpus = corpus
     self._tb = None
     self._ids = None
+    self.id_field = id_field
     if self.path.exists():
       if raw_file is not None:
         if self.path.stat().st_mtime < Path(raw_file).stat().st_mtime:
@@ -47,8 +48,11 @@ class Metadata(object):
           return
       else:
         return
+      
     logger.info(f"Creating catalog from {raw_file}.")
-    catalog = Catalog(raw_file, self.path, identifier = corpus.metadata_options['id_field'])
+    if corpus.input_bookstacks:
+      raw_file = corpus.input_bookstacks
+    catalog = Catalog(raw_file, self.path, id_field = self.id_field)
     logger.info(f"Saving metadata ({len(catalog.nc_catalog)} rows)")
     feather.write_feather(catalog.nc_catalog, self.path)
   
@@ -67,7 +71,7 @@ class Metadata(object):
   def tb(self):
     if self._tb is not None:
       return self._tb
-    logger.warning("Expensively creating table")
+    logger.warning("Loading catalog from disk.")
     self.load_processed_catalog()
     return self._tb
 
@@ -80,37 +84,6 @@ class Metadata(object):
   @property
   def path(self):
     return Path(self.corpus.root / "nonconsumptive_catalog.feather")
-
-  """
-  @property
-  def text_ids(self) -> pa.Table:
-    ""
-    Create -- or save -- a folder of textid integer lookups.
-    ""
-    path = Path(self.corpus.root / "metadata")
-    path.mkdir(exist_ok=True)
-    dest = path / "textids.feather"
-    if dest.exists():
-      logger.debug("Reading textids from cache")
-      return feather.read_table(dest)
-    logger.debug("Creating textids")
-
-    ints = np.arange(len(self.tb["@id"]), dtype = np.uint32)
-    tb = pa.table([
-      pa.array(ints),
-      self.tb["@id"]
-      ], [
-        "_ncid",
-        "@id"
-      ])  
-    pa.feather.write_feather(tb, dest)
-    return tb
-  @property
-  def id_to_int_lookup(self):
-    ids = self.text_ids
-    dicto = dict(zip(ids["@id"].to_pylist(), ids['_ncid'].to_pylist()))
-    return dicto
-  """
 
   def get(self, id) -> dict:
     matching = pc.filter(self.tb, pc.equal(self.tb["@id"], pa.scalar(id)))
@@ -162,7 +135,7 @@ class Metadata(object):
         elif pa.types.is_list(col.type):
           tname = name
           parents = col.value_parent_indices()
-          tables[tname]['_ncid'] = batch['_ncid'].take(parents)
+          tables[tname]['_ncid'] = tables['fastcat']['_ncid'].take(parents)
           flat = col.flatten()
           if pa.types.is_dictionary(col.type):
             dict_tables.add(name)
@@ -180,7 +153,8 @@ class Metadata(object):
       written_meta += len(batch)
 
     for name in dict_tables:
-      # Use the last batch for dictionaries
+      # dictionaries can be written just once, using the final batch
+      # from the iteration above.
       col = batch[name]
       table_name = name + "Lookup"
       tab = pa.table(
@@ -201,39 +175,54 @@ def infer_id_field(tb: pa.Table) -> str:
     if field.name in default_names:
       return field.name
   raise NameError("No columns named '@id', 'id' or 'filename' in data; please manually set an id for each document.")
-"""
-def ingest_json(file:Path) -> pa.Table:
 
-    ""
+def ingest_json(file : Path, write_dir : Path) -> pa.Table:
+
+    """
     JSON ingest includes some error handling for values with inconsistent encoding as 
     arrays or strings.
-    ""
+    
+    Recurses every time it finds another array field (inefficient).
+    """
 
     try:
-        return pa.json.read_json(file)
+      input = file
+      if file.suffix == ".gz":
+        input = gzip.open(str(file), "rb") 
+      # Needs large block size to avoid 'straddling object straddles two block boundaries' errors.
+      return pa.json.read_json(input, read_options = pa.json.ReadOptions(block_size = 256_000_000))
     except pa.ArrowInvalid as err:
-        match = re.search(r'Column\(/(.*)\) changed from (string|arry) to (array|string)', str(err))
+        match = re.search(r'Column\(/(.*)\) changed from (string|array) to (array|string)', str(err))
         if match:
             # Wrap the column as a list
             bad_col = match.groups()[0]
-            wrap_arrays_as_column(file, [str(bad_col)], "tmp.ndjson")
-            return ingest_json("tmp.ndjson")
-"""        
-def wrap_arrays_as_column(ndjson_file, columns, new_dest):
-    import json
-    with tmpdir() as d:
-        d = Path(d)
-        with open(d / 'converted.json', 'w') as replacement:
-            for line in open(ndjson_file):
-                line = json.loads(line)
-                for c in columns:
-                    if c in line and not type(line[c]) == list:
-                        line[c] = [line[c]]
-                replacement.write(json.dumps(line) + "\n")
-        if Path(new_dest).exists():
-            Path(new_dest).unlink()
-        (d / 'converted.json').replace(new_dest)
-    return new_dest
+            logging.warning(f"Wrapping {bad_col} as an array in all json fields")
+            newpath = write_dir / "tmp.ndjson.gz"
+            wrap_arrays_as_column(file, [str(bad_col)], newpath)
+            return ingest_json(newpath, newpath.parents[0])
+        else:
+          raise
+
+def opener(path : Path):
+  if path.suffix == ".gz":
+    return gzip.open(path, "rt")
+  else:
+    return path.open()
+
+def wrap_arrays_as_column(ndjson_file : Path, columns, new_dest : Path):
+  import json
+  dir = new_dest.parents[0]
+  with gzip.open(dir / 'converted.json.gz', 'wt') as replacement:
+    for line in opener(ndjson_file):
+      line = json.loads(line)
+      for c in columns:
+        if c in line and not type(line[c]) == list:
+          line[c] = [line[c]]
+      replacement.write(json.dumps(line) + "\n")
+  if Path(new_dest).exists():
+    Path(new_dest).unlink()
+  (dir / 'converted.json.gz').replace(new_dest)
+  return new_dest
 
 class Catalog():
     """
@@ -247,12 +236,16 @@ class Catalog():
     where records represented in a catalog are not even textual.
 
     """
-    def __init__(self, file: Optional[Union[str, Path]], final_location: Optional[Union[str, Path]] = None, identifier: Optional[str] = None, exclude_fields = set([])):
+    def __init__(self, 
+      file: Optional[Union[str, Path, pa.Table]],
+      final_location: Optional[Union[str, Path]] = None,
+      id_field: Optional[str] = None,
+      exclude_fields = set([])):
       """
       file: the file to load. This can be either a raw csv, json, etc; or a final nonconsumptive parquet/feather file.
       final_location: If 'file' is not a nonconsumptive catalog, the location at which one should be stored.
 
-      identifier: the field containing a unique id for each item. If None, will use 
+      id_field: the field containing a unique id for each item. If None, will use 
       {'@id', 'id', or 'filename'} if they are in the set. (In that order, except if
       one appears as the first column, in which case the first-column one will be 
       preferred.)
@@ -261,20 +254,25 @@ class Catalog():
 
       table: an instantiated table from somewhere else. Can be used as an input.
       """
-
+      self.final_location = Path(final_location)
+      self.tb = None
+      self.id_field = id_field
       if file is None and final_location is not None:
         file = final_location
-      
+
       self.file = Path(file)
-      if self.file.suffix == ".gz":
+
+      if self.file.is_dir():
+        self.raw_tb = file
+        self.format = "bookstacks"
+        self.id_field = id_field
+      elif self.file.suffix == ".gz":
         self.compression = ".gz"
         self.format = self.file.with_suffix("").suffix
       else:
         self.compression = None
         self.format = self.file.suffix
-      self.final_location = Path(final_location)
-      self.tb = None
-      self.identifier = identifier
+
       if self.format == ".feather":
         self.tb = feather.read_table(self.file)
         try:
@@ -289,12 +287,12 @@ class Catalog():
 
       if self.tb is None:
         self.load_preliminary_file(self.file)
-        if self.identifier is None:
-          self.identifier = infer_id_field(self.raw_tb)
+        if self.id_field is None:
+          self.id_field = infer_id_field(self.raw_tb)
         else:
           pass
       else:
-        self.identifier = "this shouldn't matter"
+        self.id_field = "this shouldn't matter"
 
     def load_existing_nc_metadata(self):
       if not self.final_location.exists():
@@ -312,17 +310,21 @@ class Catalog():
         self.load_csv(path)
       elif self.format == ".feather":
         self.load_feather(path)
+      elif self.format == "bookstacks":
+        self.load_bookstacks(path)
+      else:
+        raise NotImplementedError(f"Unable to load metadata information: strategy for format {self.format}")
+    def load_bookstacks(self, path):
+      self.raw_tb = Athenaeum(self.file).metadata()
 
     def load_feather(self, file):
       self.raw_tb = pa.feather.read_table(file)
 
-    def load_ndjson(self, file):
+    def load_ndjson(self, file : Path):
       """
       Read metadata from an ndjson file.
       """
-      if self.compression == ".gz":
-        file = gzip.open(file)
-      self.raw_tb = pa_json.read_json(file)
+      self.raw_tb = ingest_json(file, self.final_location.parents[0])
 
     def load_csv(self, file):
       if self.compression == ".gz":
@@ -340,16 +342,22 @@ class Catalog():
       if self.tb:
         return self.tb
       fields = []
+      if self.id_field is None:
+        self.id_field = infer_id_field(self.raw_tb)
+      all_ids = self.raw_tb[self.id_field]
+      assert len(all_ids) == len(set(all_ids)), \
+        f"Duplicate catalog values in {self.id_field} not allowed " + \
+        f"but {len(all_ids) - len(set(all_ids))} present."
       for name in self.raw_tb.schema.names:
         role = None
-        if name == self.identifier:
+        if name == self.id_field:
           role = "identifier"
         col = Column(self.raw_tb[name], name, role)
         fields.append(col.field())
       schemas, columns = zip(*fields)
       self.tb = pa.table(columns, schema = pa.schema(schemas, metadata = {'nonconsumptive': json.dumps(self.metadata)}))
       return self.tb
-
+      
 class Column():
     """
     A single column of metadata as represented in the original and imported into 
@@ -366,7 +374,10 @@ class Column():
       self.meta : Dict[str, Any] = {}
       self._best_form = None
       if isinstance(data.type, pa.ListType):
-        self.parent_list_indices = pa.chunked_array([d.offsets for d in data.chunks])
+        self.parent_list_indices = pa.chunked_array(
+          # Only take the last offset from the last element.
+          [d.offsets for d in data.chunks]
+        )
         self.c = pa.chunked_array([d.flatten() for d in data.chunks])
       else:
         self.c = data
@@ -402,11 +413,20 @@ class Column():
     
     @property
     def date_form(self):
-      if pa.types.is_timestamp(self.c.type):
-        return self.c.cast(pa.date32())
+      try:
+        if pa.types.is_timestamp(self.c.type):
+          # Getting weird intraday problems, so hacking my way out.
+          #return pc.cast(self.date.c, pa.date64(), cast_options = pc.CastOptions(allow_time_truncate = True))
+          return pc.multiply(1000, self.c.cast(pa.int64()).cast(pa.int64())).cast(pa.date64())          
+        if pa.types.is_time(self.c.type):
+          return self.c.cast(pa.date32())
+        if pa.types.is_date(self.c.type):
+          return self.c.cast(pa.date32())        
+      except:
+        raise TypeError("Unable to cast between times")
       datelike_share = pc.mean(pc.match_substring_regex(self.c, "[0-9]{3,4}-[0-1]?[0-9]-[0-3]?[0-9]").cast(pa.int8()))
       if pc.greater(datelike_share, pa.scalar(.95)).as_py():
-        series = pl.Series.parse_date("date", self.pl, pl.datatypes.Date32, "%Y-%m-%d")
+        series = self.pl.str.strptime(pl.datatypes.Date32, "%Y-%m-%d")
         return series.to_arrow()
       else:
         raise ValueError(f"only {datelike_share} of values look like a date string.")
@@ -419,7 +439,6 @@ class Column():
     def freq_dict_encode(self, nt = pa.int32()):
       """
       Convert into a dictionary where keys are ordered by count.
-
       """
       counts = pa.RecordBatch.from_struct_array(self.c.value_counts())
       # sort decreasing
@@ -430,9 +449,21 @@ class Column():
           f"{self.name}": counts['values']
           , f"_count": counts['counts']      
       })
-      indices = pc.index_in(self.c, value_set=counts['values']).cast(nt)
-      return pa.DictionaryArray.from_arrays(indices.combine_chunks(), idLookup[self.name].combine_chunks(), ordered = True)
 
+      # Rebuild into chunked array.
+      ix = 0
+      arrs = []
+
+      dictionary = idLookup[self.name].combine_chunks()
+      for chunks in self.c.chunks:
+        indices = pc.index_in(self.c, value_set=dictionary).cast(nt)
+        arr = pa.DictionaryArray.from_arrays(
+          indices,
+          dictionary,
+          ordered = True
+        )
+        arrs.append(arr)
+      return pa.chunked_array(arrs)
     
     def cardinality(self):
       c = self.c
@@ -464,7 +495,15 @@ class Column():
       # Convert back to a list form from an unnested one after type coercion.
       if self.parent_list_indices is None:
         return form
-      return pa.ListArray.from_arrays(self.parent_list_indices.combine_chunks(), form.combine_chunks())
+      chunks = []
+      for i, chunk in enumerate(form.chunks):
+        chunks.append(
+          pa.ListArray.from_arrays(
+            self.parent_list_indices.chunk(i),
+            form.chunk(i)
+          )
+        )
+      return pa.chunked_array(chunks)
       
     def field(self):
       form = self.best_form

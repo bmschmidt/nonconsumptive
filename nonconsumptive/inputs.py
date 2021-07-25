@@ -11,7 +11,7 @@ from pyarrow import compute as pc
 import logging
 import gzip
 from pyarrow import feather, ipc
-from .data_storage import Node, BatchIDIndex
+from .data_storage import Node, BatchIDIndex, ArrowReservoir
 logger = logging.getLogger("nonconsumptive")
 
 def input(path, corpus = None, format = "txt", compression=None):
@@ -42,50 +42,55 @@ class TextInput():
       id = id.as_py()
       yield self[id]
 
-class SingleFileInput(TextInput):
-  __doc__ = """
 
-  One text per line (no returns in any document).
-  id field separated from the rest of the doucment by a tab. (no tabs allowed in id.)
+class InputFeather(ArrowReservoir):
+    """
+    A class to translate from a mallet-style input.txt to the same in feather,
+    which is much better for random access.
+    """
+    arrow_schema = pa.schema({"@id": pa.string(), "text": pa.string()})
+    name = "input_feather"
+    def __init__(self, corpus, fin, format = "txt"):
+        self.fin = Path(fin)
+        self.text_cache = []
+        self.id_cache = []
+        self.text_cache_size = []
+        self.format = format
+        if self.format != "txt":
+          raise NotImplementedError("Only txt input supported right now.")
+        super().__init__(corpus)
+        self.uuid = "input"
 
-  """
-  def __init__(self,
-    dir:Path = Path("input.txt"),
-    corpus: Optional["Corpus"] = None,
-    compression: Optional[str] = None,
-    format: str = "txt"):
+    
+    @property
+    def filepath(self):
+        return self.corpus.root / "input.feather"
+    
+    @property
+    def input_txt(self):
+        infile = Path(self.fin)
+        assert infile.exists()
+        if infile.suffix == ".gz":
+            file = gzip.open(infile, 'rt')
+        else:
+            file = open(infile)
+        return file
 
-    self.format = format
-    self.compression = compression
-    self.dir = dir
-    super().__init__(corpus)
-
-  def _offset_cache(self):
-    pass
-
-  def __getitem__(self, key):
-    logger.warning("STOPGAP BEING USED FOR GETITEM")
-    for id, text in self._iter_documents():
-      if id == key:
-        return text
-    raise KeyError("Can't find")
-
-  def _iter_documents(self) -> Iterator[Tuple[str, str]]:
-    errored = []
-    opener : function = open
-    if self.compression == "gz":
-      file = gzip.open(self.dir, 'rt')
-    else:
-      file = open(self.dir)
-    for line in file:
-      try:
-        id, text = line.split("\t", 1)
-        yield id, text
-      except ValueError:
-        errored.append(line)
-    if len(errored):
-      logger.warning(f"{len(errored)} unprintable lines, including:\n")
-      logger.warning(*errored[:5])
+    def _from_upstream(self):
+        errored = []
+        seen = set([])
+        logger.info(f"Constructing feather version of {self.fin}")
+        for line in self.input_txt:
+            try:
+                id, text = line.split("\t", 1)
+                if id in seen:
+                  logger.warning(f"Duplicate ids for {id}")
+                  continue
+                seen.add(id)
+                # Start off one record batch per line. Inefficient. Saves code, though.
+                yield pa.record_batch([pa.array([id]), pa.array([text])], self.arrow_schema)
+            except ValueError:
+                errored.append(line)
 
 class FolderInput(TextInput):
   __doc__ = """
@@ -149,6 +154,8 @@ class PandocInput(TextInput):
   def __iter__(self):
     pass
 
+
+
 class MetadataInput(TextInput):
   __doc__ = """
   For cases when the full text is stored inside the 
@@ -157,14 +164,18 @@ class MetadataInput(TextInput):
   Rather than expensively parse multiple times, the best practice here is to convert to 
   feather *once* and then extract text and ids from the metadata column.
   """
-  def __init__(self, path, text_field = "@text", corpus = None, **kwargs):
+  def __init__(self, path, text_field = "text", corpus = None, **kwargs):
     self.text_field = text_field
     self.path = path
     self._tb = None
     super().__init__(corpus)
 
   def iter_texts_for_ids(self, ids) -> Iterator[str]:
-    indices = pc.index_in(ids, value_set = self.tb["@id"])
+    try:
+      indices = pc.index_in(ids, value_set = self.tb["@id"])
+    except pa.ArrowNotImplementedError:
+      logger.warning(f"Error with {self.path}:")
+      raise
     for index in indices:
       yield self.tb[self.text_field][index.as_py()].as_py()
 
@@ -172,7 +183,8 @@ class MetadataInput(TextInput):
   def tb(self):
     if self._tb is not None:
       return self._tb
-    self._tb = feather.read_table(self.path, columns = [self.text_field, "@id"])
+    self._tb = feather.read_table(self.path,
+      columns = [self.text_field, "@id"])
     return self._tb
     
   def ids(self) -> Iterator[str]:
@@ -186,4 +198,30 @@ class MetadataInput(TextInput):
   def __iter__(self) -> Iterator[str]:
     for text in feather.read_table(self.path, columns = [self.text_field])[self.text_field]:
       yield text.as_py()
-    
+  
+
+class SingleFileInput(MetadataInput):
+  __doc__ = """
+
+  One text per line (no returns in any document).
+  id field separated from the rest of the doucment by a tab.
+  (no tabs allowed in id.)
+
+  This format is immediately transformed into a feather-based file at 
+  path/input.feather.
+
+  """
+  def __init__(self,
+    dir:Path = Path("input.txt"),
+    corpus: Optional["Corpus"] = None,
+    compression: Optional[str] = None,
+    format: str = "txt"):
+
+    self.transformed_input = InputFeather(corpus, dir, format)
+    self.transformed_input.build_cache()
+
+    super().__init__(
+      path = self.transformed_input.filepath,
+      text_field = "text",
+      corpus = corpus
+      )

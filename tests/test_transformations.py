@@ -77,3 +77,15 @@ class TestBookstacks():
     counts = stack1.get_transform("token_counts")
     for counts in counts:
         pass
+
+class TestSRP():
+  def test_srp_instantiation(self, dissertation_corpus):
+    d = dissertation_corpus.bookstacks[0]
+    d.get_transform
+    stack1 = Bookstack(dissertation_corpus, "00000")
+    srp = stack1.get_transform("srp")
+    for tokens in srp.iter_docs():
+        pass
+    counts = stack1.get_transform("token_counts")
+    for counts in counts:
+        pass

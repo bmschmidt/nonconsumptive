@@ -28,7 +28,7 @@ def dissertation_corpus(corrected_dissertations, tmpdir):
   return Corpus(texts = None,
             metadata = corrected_dissertations,
             dir = tmpdir,
-            text_options = {"text_field" : "dissertation"})
+            text_options = {"metadata_field" : "dissertation"})
 
 @pytest.fixture(scope="function")
 def non_metadata_corpus(tmpdir_factory):

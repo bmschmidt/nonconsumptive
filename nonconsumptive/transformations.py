@@ -11,6 +11,10 @@ import logging
 logger = logging.getLogger("nonconsumptive")
 import polars as pl
 
+# Placeholders.
+SRP = None
+np = None
+
 try:
   import blingfire
   from blingfire import blingfire as bf # C bindings
@@ -55,7 +59,19 @@ class Text(ArrowLineChunkedReservoir):
   name = "text"
   arrow_schema = pa.schema({"text": pa.string()})
 
+  def _from_stacks(self):
+    stack = self.corpus.input_bookstacks / f"{self.uuid}.parquet"
+    fin = parquet.ParquetFile(stack)
+    # Low batch size because books are long. For shorter texts, a larger batch size
+    # might be marginally better.
+    for i, batch in enumerate(fin.iter_batches(columns = ['nc:text'], batch_size = 250)):
+      logging.debug(f"Yielding batch {i} from {stack}")
+      yield pa.record_batch([batch['nc:text']], self.arrow_schema)
+      
   def _from_upstream(self):
+    if self.corpus.input_bookstacks:
+      yield from self._from_stacks()
+      return
     ids = self.bookstack.ids['@id']
     current_batch = []
     current_size = 0
@@ -63,7 +79,7 @@ class Text(ArrowLineChunkedReservoir):
       current_batch.append(text)
       current_size += len(text) # Use char length as proxy for byte length. Bad for Russian, worse for Chinese.
       if current_size >= self.bookstack.TARGET_BATCH_SIZE:
-        yield pa.RecordBatch.from_arrays([pa.array(current_batch), pa.string()], ["text"])
+        yield pa.RecordBatch.from_arrays([pa.array(current_batch, pa.string())], ["text"])
         current_batch = []
         current_size = 0
     yield pa.RecordBatch.from_arrays([pa.array(current_batch, pa.string())], ["text"])
@@ -84,8 +100,6 @@ class Tokenization(ArrowLineChunkedReservoir):
       array = tokenize_arrow(batch['text'])
       yield pa.RecordBatch.from_arrays([array], ['tokenization'])
 
-class SRP_Transform(ArrowLineChunkedReservoir):
-  name = "srp_transform"
 
 class DocumentLengths(ArrowLineChunkedReservoir):
   name = "document_lengths"
@@ -107,6 +121,49 @@ class DocumentLengths(ArrowLineChunkedReservoir):
         nbytes = 0
     if len(counts):
       yield pa.record_batch([pa.chunked_array(counts).combine_chunks()], ['nwords'])
+
+class SRP_Transform(ArrowIdChunkedReservoir):
+  name = "SRP"
+
+  def __init__(self, bookstack, *args, **kwargs):
+    super().__init__(bookstack, *args, **kwargs)
+    self._upstream = self.bookstack.get_transform("token_counts")
+    global SRP
+    global np
+    if SRP is None:
+      import SRP
+    if np is None:
+      import numpy as np      
+    
+  base_type = pa.list_(pa.float32(), 1280)
+
+  @property
+  def hasher(self):
+    global SRP
+    global np
+    if SRP is None:
+      import SRP
+    if np is None:
+      import numpy as np        
+    if "SRP_hasher" in self.corpus.slots:
+      return self.corpus.slots["SRP_hasher"]
+    # Because a hasher contains a cache, it's bound to the 
+    # full corpus rather than the bookstack to avoid 
+    # unnecessarily re-learning embeddings.
+    hasher = SRP.SRP(1280)
+    self.corpus.slots['SRP_hasher'] = hasher
+    return hasher
+
+  def process_batch(self, counts: pa.Array) -> pa.Array:
+    # Count the words, and cast to uint32.
+    words, counts = counts.flatten()
+    try:
+      hashed = self.hasher.stable_transform(words.to_pylist(), counts.to_numpy())
+      # bit_rep = np.packbits(hashed > 0).tobytes()
+
+    except SRP.EmptyTextError:
+      hashed = np.full(1280, np.sqrt(1280), np.float32)
+    return pa.array(hashed)
 
 class TokenCounts(ArrowIdChunkedReservoir):
   """
@@ -258,9 +315,7 @@ class EncodedCounts(ArrowReservoir):
     return self.corpus.total_wordcounts["token"]
 
   def process_batch(self, batch) -> pa.RecordBatch:
-
     derived = []
-
     for f in batch.schema:
       name = f.name
       if name == "token":
@@ -268,6 +323,7 @@ class EncodedCounts(ArrowReservoir):
       elif name.startswith("word"):
         derived.append(pc.index_in(batch[name], value_set = self.wordids).cast(pa.uint32()))
       else:
+        # e.g., 'count', '_ncid'.
         derived.append(batch[name])
     return pa.record_batch(derived, schema=self.arrow_schema)
 
@@ -279,15 +335,14 @@ class EncodedCounts(ArrowReservoir):
     Rather than work a batch at a time, try to do at least 10MB at once,
     so the join can be a bit more efficient.
     """
-
     for batch in self.bookstack.get_transform("token_counts").iter_with_ids("_ncid"):
       yield self.process_batch(batch)
+    self.close()
 
 class EncodedUnigrams(EncodedCounts):
-  name : str = "ncid_wordid"
+  name : str = "encoded_unigrams"
   def __init__(self, bookstack, *args, **kwargs):
     super().__init__(bookstack.get_transform("token_counts"), bookstack, *args, **kwargs)
-
 
 transformations = {
   'text': Text,
@@ -298,8 +353,8 @@ transformations = {
   'bigrams': Bigrams,
   'trigrams': Trigrams,
   'quadgrams': Quadgrams,
-  'encoded_wordcounts': EncodedUnigrams,
-  'encoded_unigrams': EncodedUnigrams
+  'encoded_unigrams': EncodedUnigrams,
+  'srp': SRP_Transform
 #  'encoded_bigrams': EncodedBigrams
 }
 

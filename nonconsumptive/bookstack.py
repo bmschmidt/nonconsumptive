@@ -27,7 +27,7 @@ logger = logging.getLogger("nonconsumptive")
 
 class Bookstack():
 
-  TARGET_BATCH_SIZE = 1024 * 1024 * 16
+  TARGET_BATCH_SIZE = 1024 * 1024 * 16 
 
   def __init__(self, parent_corpus: nc.Corpus, uuid):
     self.is_bookstack = True
@@ -68,3 +68,41 @@ def running_processes(workerlist):
         if worker.is_alive():
             running = True
     return running
+
+from pathlib import Path
+from pyarrow import parquet
+import pyarrow as pa
+from typing import Union
+
+class Athenaeum:
+    """
+    A set of bookstacks structured as a parquet dataset.
+    Should be called "Library", but for some reason all the computer 
+    people messed that up with a different set of associations.
+    """
+    def __init__(self, loc: Union[Path, str]):
+        self.dir = Path(loc)
+        assert self.dir.is_dir()
+        
+    @property
+    def schema(self):
+        f0 = self.files().__next__()
+        return parquet.ParquetFile(f0).schema_arrow
+    
+    def meta(self):
+        return [p.name for p in self.schema]
+    
+    def files(self):
+        for f in self.dir.glob("**/*.parquet"):
+            yield f
+            
+    def __repr__(self):
+        return f"A bookstack at {self.dir} with {len([*self.files()])} stacks."
+    
+    def metadata(self):
+        names = [f.name for f in self.schema if not f.name.startswith("nc:")]
+        batches = []
+        for file in self.files():
+            print(file, end="\r")
+            batches.extend(parquet.read_table(file, columns=names).to_batches())
+        return pa.Table.from_batches(batches)
