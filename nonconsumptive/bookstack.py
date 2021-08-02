@@ -1,27 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
-from .document import Document
 import pyarrow as pa
 from pyarrow import parquet, feather, RecordBatch 
-from pyarrow import compute as pc
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
   import nonconsumptive as nc
-import numpy as np
+  
 from collections import defaultdict
 from typing import DefaultDict, Iterator, Union, Optional, List, Tuple, Set, Dict
 import polars as pl
 from .data_storage import BatchIDIndex
-import uuid
-from .inputs import TextInput, FolderInput, SingleFileInput, MetadataInput
 from .transformations import transformations
 import logging
-
-from multiprocessing import Process, Queue
-from queue import Empty
-import time
 
 logger = logging.getLogger("nonconsumptive")
 

@@ -132,13 +132,12 @@ class Corpus():
 
   def setup_texts(self, texts: StrPath, from_metadata = False,
                   metadata_field : Optional[str] = None, **kwargs):
+    self._texts : Optional[TextInput] = None
     if texts is None:
-      self._texts = None
-      return False
+      return
     texts = Path(texts)
     assert texts.exists()
     self.text_location = texts
-    self._texts : TextInput
 
     if from_metadata:
       self._texts = MetadataInput(texts, text_field = metadata_field, **kwargs)
@@ -203,7 +202,7 @@ class Corpus():
           # Use one-tenth the stack size to store here.
           if stack_size >= (MAX_MEGABYTES * 1024 * 1024 / 10) or i == (len(self.bookstacks) - 1):
             logging.debug("Writing to bounter")
-            stuck = pl.from_arrow(pa.Table.from_batches(stack))
+            stuck : pl.DataFrame = pl.from_arrow(pa.Table.from_batches(stack))
             stack = []
             count = stuck.groupby("token")['count'].sum()
             del stuck
@@ -348,7 +347,7 @@ class Corpus():
       i += len(id_slice)
       yield f.with_suffix("").name
 
-  def _create_bookstack_plan(self):
+  def _create_bookstack_plan(self, size = None):
 
     dir = self.root / "bookstacks"
     dir.mkdir(exist_ok = True)
@@ -365,11 +364,23 @@ class Corpus():
     stack_names = [*self._load_bookstack_plan(dir)]
     if len(stack_names):
       stack_names.sort()
-      return stack_names    
+      return stack_names
     # Attempt to return existing plan.
+
+    # If they want a different size, rewrite the metadata batches. 
+    # This seems a little dopey to support, and may be cut.
+    if size is not None:
+      if 'bookstack_size' not in self.slots or size != self.slots['bookstack_size']:
+        new_meta = self.metadata.path.with_suffix(".replacement")
+        old_meta = feather.read_table(self.metadata.path).combine_chunks()
+        feather.write_feather(old_meta, new_meta, chunksize = size)
+        self.metadata.path.unlink()
+        new_meta.rename(self.metadata.path)
+        self.slots['bookstack_size'] = size
 
     # Build a new plan.
     cat_file = ipc.open_file(self.metadata.path)
+      
     i = 0
     for batch_num in range(cat_file.num_record_batches):
       id_slice = cat_file.get_batch(batch_num)['@id']

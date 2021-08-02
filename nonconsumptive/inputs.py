@@ -198,7 +198,8 @@ class MetadataInput(TextInput):
   def __iter__(self) -> Iterator[str]:
     for text in feather.read_table(self.path, columns = [self.text_field])[self.text_field]:
       yield text.as_py()
-  
+    
+
 
 class SingleFileInput(MetadataInput):
   __doc__ = """

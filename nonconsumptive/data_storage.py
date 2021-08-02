@@ -9,6 +9,7 @@ import json
 import yaml
 import logging
 import nonconsumptive as nc
+import numpy as np
 
 logger = logging.getLogger("nonconsumptive")
 import types
@@ -305,6 +306,8 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
 
   1. There is a single column, identified by self.name (namespaced as nc:token_counts, etc.).
   2. That column may be a struct.
+
+  And some benefits, not required to used.
   3. There is an upstream_arrays function that yields
      individual arrays.
   4. There is a process_batch function of type array -> [array/structArray] that
@@ -341,7 +344,7 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
     if self._upstream:
       return self._upstream
     else:
-      raise
+      raise NotImplementedError(f"No _upstream object set for class {self}")
 
   def upstream_arrays(self) -> Iterator[pa.Array]:
     # Yields one array per document.
@@ -387,21 +390,28 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
       [self.name]
     )
 
-  def iter_docs(self):
-    for batch in self:
-      for row in batch[self.name]:
-        yield pa.record_batch(row.values.flatten(), [m.name for m in self.base_type])
+#  def iter_docs(self):
+#    for batch in self:
+#      for row in batch[self.name]:
+#        yield pa.record_batch(pc.list_flatten(row.values), [m.name for m in self.base_type])
 
   def iter_with_ids(self, id = "_ncid"):
     # Slap an ID in front of the list.
     ids = self.bookstack.ids[id]
     offset = pa.scalar(0, pa.int32())
     for batch in self:
-      indices = batch[self.name].value_parent_indices()      
+      if pa.types.is_fixed_size_list(batch[self.name].type):
+        indices = pa.array(np.repeat(np.arange(0, len(batch)), 
+           self.base_type.list_size))
+      else:
+        indices = batch[self.name].value_parent_indices()      
       try:
         ids = pc.take(ids, pc.add(indices, offset))
         offset = pc.add(offset, pa.scalar(len(batch)))
-        batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
+        if pa.types.is_struct(batch[self.name].type):
+          batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
+        else:
+          batch = pa.RecordBatch.from_arrays([batch[self.name].flatten()], [self.name])
       except pa.ArrowIndexError:
         print(offset)
         print(pc.add(indices, offset))

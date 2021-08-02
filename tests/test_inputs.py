@@ -21,4 +21,3 @@ class TestFolderInput:
   def test_ids(self, three_files):
     ids = [*three_files.ids()]
     assert len(set(ids)) == 3
-  

@@ -54,7 +54,10 @@ class Metadata(object):
       raw_file = corpus.input_bookstacks
     catalog = Catalog(raw_file, self.path, id_field = self.id_field)
     logger.info(f"Saving metadata ({len(catalog.nc_catalog)} rows)")
-    feather.write_feather(catalog.nc_catalog, self.path)
+    if not 'bookstack_size' in corpus.slots:
+      corpus.slots['bookstack_size'] = 2**14
+
+    feather.write_feather(catalog.nc_catalog, self.path, chunksize = corpus.slots['bookstack_size'])
   
   @property
   def ids(self) -> pa.Array:
@@ -186,7 +189,7 @@ def ingest_json(file : Path, write_dir : Path) -> pa.Table:
     """
 
     try:
-      input = file
+      input : Union[Path, gzip.GzipFile] = file
       if file.suffix == ".gz":
         input = gzip.open(str(file), "rb") 
       # Needs large block size to avoid 'straddling object straddles two block boundaries' errors.

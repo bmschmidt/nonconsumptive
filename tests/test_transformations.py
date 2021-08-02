@@ -45,22 +45,14 @@ class TestDocument():
     total = 0
     n = 0
     stack = simple_corpus.bookstacks[0]    
-    for batch in stack.get_transform("token_counts").iter_docs():
-        total += batch.to_pandas()['count'].sum()
-        n += 1
-        assert batch.to_pandas().shape[1] == 2
-    assert n == 3
+    for batch in stack.get_transform("token_counts"):
+        total += batch['token_counts'].flatten().flatten()[1].to_numpy().sum()
     assert 42 <= total <= 43 # Different tokenizers produce slightly different results.
 
     total = 0
-    n = 0
-    for batch in stack.get_transform("token_counts").iter_docs():
-        total += batch.to_pandas()['count'].sum()
-        n += 1
-        assert batch.to_pandas().shape[1] == 2
-    assert n == 3
+    for batch in stack.get_transform("token_counts"):
+        total += batch['token_counts'].flatten().flatten()[1].to_numpy().sum()
     assert 42 <= total <= 43 # Different tokenizers produce slightly different results.
-
 
 
   def test_idlist_refreshes(self, simple_corpus):
@@ -69,8 +61,8 @@ class TestDocument():
 
 class TestBookstacks():
   def test_chunk_instantiation(self, dissertation_corpus):
-    d = dissertation_corpus._create_bookstack_plan(size = 4)
-    stack1 = Bookstack(dissertation_corpus, "00001")
+    d = dissertation_corpus._create_bookstack_plan()
+    stack1 = Bookstack(dissertation_corpus, "00000")
     tokenization = stack1.get_transform("tokenization")
     for tokens in tokenization:
         pass
@@ -78,14 +70,26 @@ class TestBookstacks():
     for counts in counts:
         pass
 
+class TestNgrams():
+  def test_bigrams(self, dissertation_corpus):
+    d = dissertation_corpus._create_bookstack_plan()
+    stack1 = Bookstack(dissertation_corpus, "00000")
+    bigrams = stack1.get_transform("bigrams")
+    bigrams = pa.Table.from_batches([*bigrams]).to_pandas()
+  def test_encoded_bigrams(self, dissertation_corpus):
+    d = dissertation_corpus._create_bookstack_plan()
+    stack1 = Bookstack(dissertation_corpus, "00000")
+    bigrams = stack1.get_transform("encoded_bigrams")
+    bigrams = pa.Table.from_batches([*bigrams]).to_pandas()
+
+
 class TestSRP():
   def test_srp_instantiation(self, dissertation_corpus):
     d = dissertation_corpus.bookstacks[0]
     d.get_transform
     stack1 = Bookstack(dissertation_corpus, "00000")
     srp = stack1.get_transform("srp")
-    for tokens in srp.iter_docs():
+    for transformed in srp.iter_with_ids():
         pass
-    counts = stack1.get_transform("token_counts")
-    for counts in counts:
-        pass
+    # Haven't yet determined the plan here.
+    transformed['SRP'][0]

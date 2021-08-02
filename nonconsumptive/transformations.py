@@ -188,7 +188,7 @@ class TokenCounts(ArrowIdChunkedReservoir):
     return pa.StructArray.from_arrays([words, counts], ["token", "count"])
 
 class Ngrams(ArrowIdChunkedReservoir):
-  def __init__(self, bookstack, ngrams: int, end_chars: List[str] = [], beginning_chars: List[str] = [], **kwargs):
+  def __init__(self, bookstack, ngrams: int, *args, **kwargs):
     """
 
     Creates an (optionally cached) iterator over record batches of ngram counts.
@@ -208,55 +208,42 @@ class Ngrams(ArrowIdChunkedReservoir):
     """
     self.ngrams = ngrams
     self.name = f"{ngrams}gram_counts"
-    self.end_chars = end_chars
-    self.beginning_chars = beginning_chars
-    self._arrow_schema = None
-    super().__init__(bookstack, **kwargs)
-
+#    self.end_chars = end_chars
+#    self.beginning_chars = beginning_chars  
+    super().__init__(bookstack, *args, **kwargs)
+    self._upstream = self.bookstack.get_transform("tokenization")
+    
   def _from_local(self):
     pass
 
   @property
-  def arrow_schema(self) -> pa.Schema:
-    if self._arrow_schema:
-      return self._arrow_schema
-    labs = {}
-    for n in range(self.ngrams):
-      labs[f"token{n + 1}"] = pa.list_(pa.utf8())
-      labs['count'] = pa.list_(pa.uint32())
-    self._arrow_schema = pa.schema(labs)
-    return self._arrow_schema
-  
-  def _from_upstream(self) -> Iterator[RecordBatch]:
+  def base_type(self):
+    return pa.struct([
+      *[pa.field(f"token{i + 1}", pa.string()) for i in range(self.ngrams)],
+      pa.field("count", pa.uint32())])
+
+  def process_batch(self, tokens: pa.Array) -> pa.Array:
     ngrams = self.ngrams
-    for batch in self.bookstack.tokenization():
-      zengrams = ngrams - 1 # Zero-indexed ngrams--slightly more convenient here.
-      tokens = batch['token']
-      cols = {}
-      for n in range(ngrams):
-          if n == 0:
-              cols["token1"] = tokens[:-zengrams]
-          elif n == ngrams - 1:
-              cols[f"token{n+1}"] = tokens[n:]
-          else:
-              cols[f"token{n+1}"] = tokens[n:-(zengrams-n)]
-      ngram_tab = pa.table(cols)
-      if len(ngram_tab) < ngrams:
-        empty : List = [[]]
-        # Still register that we saw the id even if it's not long enough for ngrams
-        yield pa.RecordBatch.from_arrays(empty * len(self.arrow_schema.names), schema=self.arrow_schema)
-        continue
-      # Temporarily pass through pandas because https://github.com/pola-rs/polars/issues/668
-      t = pl.from_pandas(ngram_tab.to_pandas())
-      counts = t.groupby([f"token{i+1}" for i in range(ngrams)])\
-          .agg([pl.count("token1").alias("count")])
+    # Could also do the ids here as part of the grouping.
 
-      other_cols = []
-      for i in range(ngrams):
-          other_cols.append(counts[f'token{i+1}'].to_arrow().cast(pa.string()))
-      other_cols.append(counts['count'].to_arrow())
-      yield pa.RecordBatch.from_arrays(other_cols, schema=self.arrow_schema)
+    # Converting to pylist because of bug I can't track down in polars.
+    frame = pl.DataFrame({'token': tokens.to_pylist()})
+    lazy = frame.lazy()
+    for i in range(ngrams):
+        lazy = lazy.with_column(pl.col("token").shift(i).alias(f"word{i+1}"))
+    lazy = lazy.filter(pl.col(f"word{ngrams}").is_not_null())
+    lazy = lazy.groupby([f"word{i+1}" for i in range(ngrams)])\
+       .agg([pl.count("word1").alias("count")])
+    frame = lazy.collect()
 
+    cols = {}
+    for i in range(ngrams):
+      ngram = f"word{i + 1}"
+      cols[ngram] = frame[ngram].to_arrow().cast(pa.string())
+    cols['count'] = frame['count'].to_arrow().cast(pa.uint32())
+    instructed = pa.StructArray.from_arrays(
+      [*cols.values()], [*cols.keys()])
+    return instructed
 
 class Bigrams(Ngrams):
   """
@@ -316,14 +303,19 @@ class EncodedCounts(ArrowReservoir):
 
   def process_batch(self, batch) -> pa.RecordBatch:
     derived = []
+
+    tabbed = pa.Table.from_batches([batch]).flatten()
     for f in batch.schema:
       name = f.name
-      if name == "token":
-        derived.append(pc.index_in(batch[name], value_set = self.wordids).cast(pa.uint32()))
-      elif name.startswith("word"):
-        derived.append(pc.index_in(batch[name], value_set = self.wordids).cast(pa.uint32()))
+      arr = batch[f.name]
+      if pa.types.is_struct(arr.type):
+        for array in arr.flatten()[:-1]:
+          #lookup word ids. 
+          derived.append(pc.index_in(array, value_set = self.wordids).cast(pa.uint32()))
+        # The counts comes last.
+        derived.append(arr.flatten()[-1].cast(pa.uint32()))
       else:
-        # e.g., 'count', '_ncid'.
+        # e.g., '_ncid'.
         derived.append(batch[name])
     return pa.record_batch(derived, schema=self.arrow_schema)
 
@@ -335,7 +327,7 @@ class EncodedCounts(ArrowReservoir):
     Rather than work a batch at a time, try to do at least 10MB at once,
     so the join can be a bit more efficient.
     """
-    for batch in self.bookstack.get_transform("token_counts").iter_with_ids("_ncid"):
+    for batch in self._upstream.iter_with_ids("_ncid"):
       yield self.process_batch(batch)
     self.close()
 
@@ -343,6 +335,11 @@ class EncodedUnigrams(EncodedCounts):
   name : str = "encoded_unigrams"
   def __init__(self, bookstack, *args, **kwargs):
     super().__init__(bookstack.get_transform("token_counts"), bookstack, *args, **kwargs)
+
+class EncodedBigrams(EncodedCounts):
+  name : str = "encoded_bigrams"
+  def __init__(self, bookstack, *args, **kwargs):
+    super().__init__(bookstack.get_transform("bigrams"), bookstack, *args, **kwargs)
 
 transformations = {
   'text': Text,
@@ -354,6 +351,7 @@ transformations = {
   'trigrams': Trigrams,
   'quadgrams': Quadgrams,
   'encoded_unigrams': EncodedUnigrams,
+  'encoded_bigrams': EncodedBigrams,
   'srp': SRP_Transform
 #  'encoded_bigrams': EncodedBigrams
 }

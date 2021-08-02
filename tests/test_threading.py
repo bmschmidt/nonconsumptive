@@ -49,6 +49,7 @@ class TestChunkPlan():
     assert len(feathers) == 3
     for p in dissertation_corpus.root.glob("bookstacks/*.feather"):
       p.unlink()
+    
     dissertation_corpus._create_bookstack_plan(size = 6)
     feathers = [*dissertation_corpus.root.glob("bookstacks/*.feather")]
     assert len(feathers) == 2

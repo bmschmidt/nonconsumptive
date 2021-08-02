@@ -105,7 +105,7 @@ class TestIteration():
     def test_encode_wordcounts(self, simple_corpus):
         total = 0
         n = 0
-        for batch in simple_corpus.encoded_wordcounts():
+        for batch in simple_corpus.iter_over("encoded_unigrams"):
             total += batch.to_pandas()['count'].sum()
             n += 1
             assert batch.to_pandas().shape[1] == 3
