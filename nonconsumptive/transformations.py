@@ -302,33 +302,58 @@ class EncodedCounts(ArrowReservoir):
     return self.corpus.total_wordcounts["token"]
 
   def process_batch(self, batch) -> pa.RecordBatch:
-    derived = []
+    derived = {}
 
-    tabbed = pa.Table.from_batches([batch]).flatten()
-    for f in batch.schema:
-      name = f.name
-      arr = batch[f.name]
-      if pa.types.is_struct(arr.type):
-        for array in arr.flatten()[:-1]:
-          #lookup word ids. 
-          derived.append(pc.index_in(array, value_set = self.wordids).cast(pa.uint32()))
-        # The counts comes last.
-        derived.append(arr.flatten()[-1].cast(pa.uint32()))
-      else:
-        # e.g., '_ncid'.
-        derived.append(batch[name])
-    return pa.record_batch(derived, schema=self.arrow_schema)
+    # The first flatten combines chunks, and the second
+    # disentangles the struct columns ['word1', 'count'].
+    array = batch[0].flatten().flatten()
+    step = len(array[0])
+
+    # Array them end to end so the lookup can happen in a single pass.
+    words = pa.chunked_array(array[:-1])
+    encoded = pc.index_in(words, value_set = self.wordids).cast(pa.uint32())
+
+
+    if self.ngrams == 1: # Just a different name.
+      derived = {'wordid': encoded.chunk(0)}
+    else: 
+      derived = {f"word{n + 1}": encoded[(n*step):(n+1)*step].combine_chunks()
+        for n in range(self.ngrams)
+      }
+    """
+    for ngrams, tokens in enumerate(array[:-1]):
+        #lookup word ids.
+        k = f'word{ngrams + 1}'
+        if self.ngrams == 1:
+          k = 'wordid'
+        derived[k] = pc.index_in(tokens, value_set = self.wordids).cast(pa.uint32())
+      # The counts comes last.
+    """
+    derived['count'] = array[-1].cast(pa.uint32())
+
+    # Stupid--for back-compatibility, to allow one-grams to have a different name in their table.
+    return pa.record_batch([derived[k] for k in derived.keys()], names = [*derived.keys()])
 
   def iter_docs(self):
     yield from self
 
-  def _from_upstream(self) -> pa.Table:
+  def _from_upstream(self) -> Iterator[pa.RecordBatch]:
     """
     Rather than work a batch at a time, try to do at least 10MB at once,
     so the join can be a bit more efficient.
     """
-    for batch in self._upstream.iter_with_ids("_ncid"):
-      yield self.process_batch(batch)
+    offset = 0
+    ids = self.bookstack.ids['_ncid']
+    for batch in self._upstream:
+      encoded = self.process_batch(batch)
+      indices = batch[0].value_parent_indices()
+      indices = pc.add(indices, offset)
+      offset += len(batch)
+      id_col = pc.take(ids, indices).combine_chunks()
+
+      cols = [id_col, *encoded]
+      names = ["_ncid", *[f.name for f in encoded.schema]]
+      yield pa.record_batch(cols, names)
     self.close()
 
 class EncodedUnigrams(EncodedCounts):
@@ -341,6 +366,11 @@ class EncodedBigrams(EncodedCounts):
   def __init__(self, bookstack, *args, **kwargs):
     super().__init__(bookstack.get_transform("bigrams"), bookstack, *args, **kwargs)
 
+class EncodedTrigrams(EncodedCounts):
+  name : str = "encoded_trigrams"
+  def __init__(self, bookstack, *args, **kwargs):
+    super().__init__(bookstack.get_transform("trigrams"), bookstack, *args, **kwargs)
+
 transformations = {
   'text': Text,
   'document_lengths': DocumentLengths,
@@ -352,7 +382,7 @@ transformations = {
   'quadgrams': Quadgrams,
   'encoded_unigrams': EncodedUnigrams,
   'encoded_bigrams': EncodedBigrams,
-  'srp': SRP_Transform
-#  'encoded_bigrams': EncodedBigrams
+  'srp': SRP_Transform,
+  'encoded_trigrams': EncodedTrigrams
 }
 
