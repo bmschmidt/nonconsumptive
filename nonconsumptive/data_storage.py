@@ -407,6 +407,8 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
         indices = batch[self.name].value_parent_indices()      
       try:
         ids = pc.take(ids, pc.add(indices, offset))
+        if isinstance(ids, pa.ChunkedArray):
+          ids = ids.combine_chunks()
         offset = pc.add(offset, pa.scalar(len(batch)))
         if pa.types.is_struct(batch[self.name].type):
           batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
@@ -417,5 +419,5 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
         print(pc.add(indices, offset))
         print(len(ids))
         raise
-      yield pa.record_batch([indices, *batch.columns],
+      yield pa.record_batch([ids, *batch.columns],
              [id, *[f.name for f in batch.schema]])
