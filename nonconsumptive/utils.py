@@ -55,6 +55,7 @@ def chunk_ids(ids, min_length = 2**8, max_length = 2**14):
 class BookstackBuilder():
   def __init__(self, dir : Path, max_docs_in_file = float("Inf"), 
     max_docs_in_batch = 128, schema : pa.Schema = None):
+
     """
     max_docs: if a parquet file is more than this many 
     documents, create a new one.
@@ -91,6 +92,7 @@ class BookstackBuilder():
       self.flush()
     self.current_docs_in_file += 1
     if self.current_docs_in_file > self.max_docs_in_file:
+      self.current_docs_in_file = 0
       self.advance_parquet_file()
 
   def flush(self):

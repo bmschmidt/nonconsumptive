@@ -82,8 +82,10 @@ class Metadata(object):
     pass
 
   def load_processed_catalog(self, columns = ["@id"]):
-    self._tb = feather.read_table(self.path, columns = columns)
-  
+    if columns is None:
+      self._tb = feather.read_table(self.path)
+    else:
+      self._tb = feather.read_table(self.path, columns = columns)
   @property
   def path(self):
     return Path(self.corpus.root / "nonconsumptive_catalog.feather")
@@ -102,6 +104,8 @@ class Metadata(object):
     """
     Writes flat parquet files suitable for duckdb ingest or other use
     in a traditional relational db setting, including integer IDs.
+
+    This corresponds to the first normal form on most fields.
 
     Just does it in one giant go; could do it by batches for performance/memory handling, but we don't.
     """
@@ -459,7 +463,8 @@ class Column():
 
       dictionary = idLookup[self.name].combine_chunks()
       for chunks in self.c.chunks:
-        indices = pc.index_in(self.c, value_set=dictionary).cast(nt)
+        indices = pc.index_in(self.c, value_set=dictionary).cast(nt).combine_chunks()
+        print(indices, dictionary)
         arr = pa.DictionaryArray.from_arrays(
           indices,
           dictionary,
@@ -491,7 +496,7 @@ class Column():
       if quant:
         self.meta['quantiles'] = json.dumps(quant)
       if pa.types.is_dictionary(self.best_form.type):
-        self.meta['top_values'] = json.dumps(self.best_form.dictionary[:10].to_pylist())
+        self.meta['top_values'] = json.dumps(self.best_form[0].dictionary[:10].to_pylist())
       return self.meta
 
     def relist(self, form):
@@ -548,11 +553,12 @@ class Column():
       try:
         counts, total = self.cardinality()
         if counts / total < .5:
-            try:
-                self._best_form = self.dict_encode()
-                return self._best_form
-            except pa.ArrowInvalid:
-                pass
+          try:
+              self._best_form = self.dict_encode()
+              return self._best_form
+          except pa.ArrowInvalid:
+            logging.debug(f"Unable to encode {self.name} as dictionary for some reason.")
+            pass
       except pa.ArrowCapacityError:
         # Strings can overflow here. Probably a safer way to check this.
         pass

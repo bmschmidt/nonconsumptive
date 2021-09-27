@@ -395,17 +395,17 @@ class Corpus():
       i += len(id_slice)
     return stack_names
 
-  def multiprocess(task, processes = 6):
+  def multiprocess(self, task, processes = 6, stacks_per_process = 3):
     ids = [[]]
+#    ids = [p.id for p in self.bookstacks]
     for stack in self.bookstacks:
-      if len(ids[-1]) < 2:
-        ids[-1].append(stack.id)
+      if len(ids[-1]) < stacks_per_process:
+        ids[-1].append(stack.uuid)
       else:
-        ids.append([stack.id])
-    def doit(batches):
-      subprocess(task, batches, self.kwargs)
+        ids.append([stack.uuid])
     with Pool(processes) as p:
-      p.map(doit, ids)
+      p.starmap(subprocess, [
+        (task, ids, self.kwargs) for ids in ids])
 
 def subprocess(task, batches, kwargs):
   kwargs['only_stacks'] = batches

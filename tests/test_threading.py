@@ -6,9 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 from pyarrow import feather, json as pa_json
-import json
-
-
+import jsonb
 
 @pytest.fixture(scope="session")
 def corrected_dissertations(tmpdir_factory):

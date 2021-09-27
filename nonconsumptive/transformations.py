@@ -230,7 +230,7 @@ class Ngrams(ArrowIdChunkedReservoir):
     frame = pl.DataFrame({'token': tokens.to_pylist()})
     lazy = frame.lazy()
     for i in range(ngrams):
-        lazy = lazy.with_column(pl.col("token").shift(i).alias(f"word{i+1}"))
+        lazy = lazy.with_column(pl.col("token").shift(-i).alias(f"word{i+1}"))
     lazy = lazy.filter(pl.col(f"word{ngrams}").is_not_null())
     lazy = lazy.groupby([f"word{i+1}" for i in range(ngrams)])\
        .agg([pl.count("word1").alias("count")])

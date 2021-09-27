@@ -15,6 +15,7 @@ from .data_storage import BatchIDIndex
 from .transformations import transformations
 import logging
 
+
 logger = logging.getLogger("nonconsumptive")
 
 class Bookstack():
@@ -72,9 +73,11 @@ class Athenaeum:
     Should be called "Library", but for some reason all the computer 
     people messed that up with a different set of associations.
     """
-    def __init__(self, loc: Union[Path, str]):
+    def __init__(self, loc: Union[Path, str], mode = 'r'):
         self.dir = Path(loc)
-        assert self.dir.is_dir()
+        assert mode in 'wr'
+        if mode == 'r':
+          assert self.dir.is_dir()
         
     @property
     def schema(self):
