@@ -183,8 +183,11 @@ class MetadataInput(TextInput):
   def tb(self):
     if self._tb is not None:
       return self._tb
-    self._tb = feather.read_table(self.path,
-      columns = [self.text_field, "@id"])
+    tbs = []
+    for path in self.path.glob("*.feather"):
+      self._tb = feather.read_table(path,
+        columns = [self.text_field, "@id"])
+    self._tb = pa.concat_tables(tbs)
     return self._tb
     
   def ids(self) -> Iterator[str]:

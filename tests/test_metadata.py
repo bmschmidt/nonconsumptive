@@ -7,8 +7,6 @@ import pyarrow as pa
 from pyarrow import feather, json as pa_json
 import json
 
-
-
 @pytest.fixture(scope="session")
 def corrected_dissertations(tmpdir_factory):
   # This cleans it up a bit in a way that isn't fair, but will let some tests
@@ -43,8 +41,9 @@ def dissertation_corpus(corrected_dissertations, tmpdir):
 def non_metadata_corpus(tmpdir_factory):
   dir = Path(str(tmpdir_factory.mktemp("testing")))
   return Corpus(texts = Path('tests', 'corpora', 'test1', 'texts'), 
-                metadata = None,
-                dir = dir, text_options = {"format" : "txt"}, cache_set = {})  
+                metadata = None,                
+                dir = dir, text_options = {"format" : "txt"}, cache_set = {})
+
 class TestMetadata():
   def test_cat_alone_makes_metadata(self, dissertation_corpus):
     tb = dissertation_corpus.metadata.tb
@@ -54,9 +53,14 @@ class TestMetadata():
     tb = non_metadata_corpus.metadata.tb
     assert len(tb) == 3
 
-  def test_feather_files_written(self, tmpdir):
-    pass
-
+  def test_corpus_instantiation(self, corrected_dissertations, tmpdir):
+    path = Path(str(tmpdir))
+    first_pass = Corpus(texts = None,
+            metadata = corrected_dissertations,
+            dir = path,
+            text_options = {"metadata_field" : "dissertation"})
+    return None
+  
   def test_cache_creation(self, corrected_dissertations, tmpdir):
     path = Path(str(tmpdir))
     first_pass = Corpus(texts = None,
@@ -65,15 +69,25 @@ class TestMetadata():
             text_options = {"metadata_field" : "dissertation"})
     tb = first_pass.metadata.tb
     assert len(tb) == 12
-    persisted_data = feather.read_table(path / "nonconsumptive_catalog.feather")
+#    first_pass.metadata.load_processed_catalog()
+    assert (path / "metadata").exists()
+    persisted_data = feather.read_table(path / "metadata/00000.feather")
     assert len(persisted_data) == 12
 
   def test_cache_use(self, corrected_dissertations, tmpdir):
+    """
+    Create an incorrect catalog at the correct location and make sure that 
+    it is used rather than the whole thing being created anew. Since this 
+    test is checking for failure, it would be OK to delete it later if a new
+    test for cache use is added.
+    """
     path = Path(str(tmpdir))
     schema = pa.schema({"@id": pa.string()},
         metadata = {"nonconsumptive": json.dumps({"schema_version": "0.1.0"})})
     tb = pa.table({"@id": pa.array(["a"])}, schema = schema)
-    feather.write_feather(tb, path / "nonconsumptive_catalog.feather")
+    cat_dir =  path / "metadata"
+    cat_dir.mkdir()
+    feather.write_feather(tb, cat_dir / "00001.feather")
     should_use_cache = Corpus(texts = None,
             metadata = corrected_dissertations,
             dir = path,

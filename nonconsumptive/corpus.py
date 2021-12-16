@@ -37,7 +37,7 @@ class Corpus():
                cache_set: Set[str] = {"tokenization", "word_counts", "document_lengths"}, 
                text_options: Dict[str, Optional[str]] = {},
                metadata_options: Dict[str, Optional[str]] = {"id_field": None},
-               batching_options = {"batch_size": 2**16},
+               batching_options : Dict[str, int]= {"batch_size": 2**16},
                bookstacks : Optional[StrPath] = None, 
                only_stacks : Optional[List[str]] = None):
 
@@ -75,7 +75,7 @@ class Corpus():
     self.root: Path = Path(dir)
     self.root.mkdir(exist_ok = True)
     self.only_stacks = only_stacks
-
+    self.batch_size = batching_options["batch_size"]
     # A place where children can stash things they need to create 
     # themselves. Use with care, because not thread-safe.
     self.slots : Dict[str, Any]= {}
@@ -86,14 +86,14 @@ class Corpus():
 
     if metadata is None and bookstacks is None:
       self.setup_texts(texts, **text_options)
-      if not (self.root / "nonconsumptive_catalog.feather").exists():
+      if not (self.root / "metadata").exists():
         dummy_metadata = self.root / 'tmp_metadata.feather'
         ids = pa.table([pa.array(self.text_input.ids(), pa.string())], names = ["@id"])
         feather.write_feather(ids, dummy_metadata)
         self.setup_metadata(dummy_metadata, **metadata_options)
         dummy_metadata.unlink()
       else:
-        self.setup_metadata(self.root / "nonconsumptive_catalog.feather")
+        self.setup_metadata(self.root / "metadata")
     elif metadata is not None and bookstacks is None:
       self.setup_metadata(metadata, **metadata_options)
       if texts is None:
@@ -367,32 +367,22 @@ class Corpus():
       return stack_names
     # Attempt to return existing plan.
 
-    # If they want a different size, rewrite the metadata batches. 
-    # This seems a little dopey to support, and may be cut.
-    if size is not None:
-      if 'bookstack_size' not in self.slots or size != self.slots['bookstack_size']:
-        new_meta = self.metadata.path.with_suffix(".replacement")
-        old_meta = feather.read_table(self.metadata.path).combine_chunks()
-        feather.write_feather(old_meta, new_meta, chunksize = size)
-        self.metadata.path.unlink()
-        new_meta.rename(self.metadata.path)
-        self.slots['bookstack_size'] = size
+    # CUT--rewrite to a different block size. This is no longer allowed.
 
     # Build a new plan.
-    cat_file = ipc.open_file(self.metadata.path)
+    cat_file = (self.metadata.path)
       
     i = 0
-    for batch_num in range(cat_file.num_record_batches):
-      id_slice = cat_file.get_batch(batch_num)['@id']
+    for stack in cat_file.glob("*.feather"):
+      id_slice = feather.read_table(stack, columns = ["@id"])['@id']
       top = i + len(id_slice)
       tb = pa.table([
         id_slice,
         pa.array(range(i, top), pa.uint32())], 
         names = ["@id", "_ncid"])
-      name = f"{batch_num:05d}"
-      feather.write_feather(tb, dir / f"{name}.feather", chunksize = len(tb) + 1)
-      stack_names.append(name)
-      i += len(id_slice)
+      feather.write_feather(tb, dir / stack.name, chunksize = len(tb) + 1)
+      stack_names.append(stack.with_suffix("").name)
+      i = top
     return stack_names
 
   def multiprocess(self, task, processes = 6, stacks_per_process = 3):

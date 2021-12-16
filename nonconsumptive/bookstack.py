@@ -67,10 +67,10 @@ from pyarrow import parquet
 import pyarrow as pa
 from typing import Union
 
-class Athenaeum:
+class Bookstacks:
     """
     A set of bookstacks structured as a parquet dataset.
-    Should be called "Library", but for some reason all the computer 
+    Should be called "Library", but all the computer 
     people messed that up with a different set of associations.
     """
     def __init__(self, loc: Union[Path, str], mode = 'r'):
@@ -92,7 +92,7 @@ class Athenaeum:
             yield f
             
     def __repr__(self):
-        return f"A bookstack at {self.dir} with {len([*self.files()])} stacks."
+        return f"A bookstack set at {self.dir} with {len([*self.files()])} stacks."
     
     def metadata(self):
         names = [f.name for f in self.schema if not f.name.startswith("nc:")]

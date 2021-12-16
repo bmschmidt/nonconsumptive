@@ -19,19 +19,27 @@ try:
   import blingfire
   from blingfire import blingfire as bf # C bindings
   from ctypes import create_string_buffer, byref, c_int, c_char_p, cdll
-except:
+except ImportError:
+#  raise ImportError("Non-blingfire methods are not available: pip install blingfire")
   blingfire = None
   logger.warning("Couldn't find blingfire, falling back to regex tokenization. `pip install blingfire` for faster tokenization.")
-
+except OSError:
+  blingfire = None
+  logger.warning("OS error on blingfire import--known problem with M1 Macintoshes for now.")
 def tokenize(text):
   return blingfire.text_to_words(text).split(" ")
 
+def tokenize_without_blingfire(texts : pa.Array):
+  return pc.split_pattern_regex(texts, pattern = r"[^\p{L}]")
 def tokenize_arrow(texts : pa.Array) -> pa.Array:
   # Convert 
   # Altered from the blingfire source code at https://github.com/microsoft/BlingFire/blob/master/dist-pypi/blingfire/__init__.py
   # to work directly on pyarrow arrays without casting to and from Python.
 
   # get the UTF-8 bytes
+  if blingfire is None:
+    return tokenize_without_blingfire(texts)
+
   as_bytes : List[bytes] = []
   for text in texts:
     s_bytes = text.as_buffer().to_pybytes()

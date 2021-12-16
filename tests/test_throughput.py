@@ -28,7 +28,7 @@ class TestTables():
         as_rows = tb.to_pandas()['token_counts'].explode()
         total = as_rows.apply(lambda x: x['count']).sum()
 
-        assert 43 <= total <= 44
+        assert 40 <= total <= 44
 
 class TestIteration():
     def test_text_iteration(self, simple_corpus):
