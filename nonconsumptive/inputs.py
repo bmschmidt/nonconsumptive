@@ -185,8 +185,9 @@ class MetadataInput(TextInput):
       return self._tb
     tbs = []
     for path in self.path.glob("*.feather"):
-      self._tb = feather.read_table(path,
+      t = feather.read_table(path,
         columns = [self.text_field, "@id"])
+      tbs.append(t)
     self._tb = pa.concat_tables(tbs)
     return self._tb
     

@@ -20,9 +20,21 @@ logger = logging.getLogger("nonconsumptive")
 
 class Bookstack():
 
+  """
+  A bookstack represents a self-contained slice of corpus, including 
+  metadata, tokenizations, and other processes.
+
+  
+  """
+
   TARGET_BATCH_SIZE = 1024 * 1024 * 16 
 
   def __init__(self, parent_corpus: nc.Corpus, uuid):
+    """
+    Define a single stack in a corpus.
+
+    uuid: a unique identifier for this stack.
+    """
     self.is_bookstack = True
     self.uuid = uuid
     self._ids = None
@@ -35,8 +47,8 @@ class Bookstack():
     if self._ids is not None:
       return self._ids
 
-    self._ids = feather.read_table(self.corpus.root / f"bookstacks/{self.uuid}.feather", 
-      columns = ["@id", "_ncid"])
+    self._ids = feather.read_table(self.corpus.root / f"metadata/{self.uuid}.feather", 
+      columns = ["@id", "nc:id"])
     return self._ids
 
   @property

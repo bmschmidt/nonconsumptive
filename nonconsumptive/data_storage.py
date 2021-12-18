@@ -29,7 +29,7 @@ class BatchIDIndex(object):
     self._fout = None
     self.schema: pa.Schema = pa.schema({
           "@id": pa.string(),
-          "_ncid": pa.uint32()})
+          "nc:id": pa.uint32()})
 
   def exists(self):
     return self.fn.exists()
@@ -395,7 +395,7 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
 #      for row in batch[self.name]:
 #        yield pa.record_batch(pc.list_flatten(row.values), [m.name for m in self.base_type])
 
-  def iter_with_ids(self, id = "_ncid"):
+  def iter_with_ids(self, id = "nc:id"):
     # Slap an ID in front of the list.
     ids = self.bookstack.ids[id]
     offset = pa.scalar(0, pa.int32())

@@ -84,7 +84,7 @@ class Metadata(object):
   def __iter__(self):
     pass
 
-  def load_processed_catalog(self, columns = ["@id"]):
+  def load_processed_catalog(self, columns = None):
     tbs = []
     if columns is None:
       args = {}
@@ -139,8 +139,8 @@ class Metadata(object):
       dict_tables = set()
 
       tables : Dict[str, dict] = defaultdict(dict)
-      tables['fastcat']['_ncid'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
-      tables['catalog']['_ncid'] = tables['fastcat']['_ncid']
+      tables['fastcat']['nc:id'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
+      tables['catalog']['nc:id'] = tables['fastcat']['nc:id']
       for name, col in zip(batch.schema.names, batch.columns):
         if pa.types.is_string(col.type):
           tables['catalog'][name] = col
@@ -154,7 +154,7 @@ class Metadata(object):
         elif pa.types.is_list(col.type):
           tname = name
           parents = col.value_parent_indices()
-          tables[tname]['_ncid'] = tables['fastcat']['_ncid'].take(parents)
+          tables[tname]['nc:id'] = tables['fastcat']['nc:id'].take(parents)
           flat = col.flatten()
           if pa.types.is_dictionary(col.type):
             dict_tables.add(name)

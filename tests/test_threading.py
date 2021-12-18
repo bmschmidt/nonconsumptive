@@ -46,33 +46,33 @@ class TestChunkPlan():
     # Dissertation_corpus has 12 elements; ensure they're the
     # right length chunks
     d4 = dissertation_corpus_maker(2)
-    d4._create_bookstack_plan()
-    feathers = [*d4.root.glob("bookstacks/*.feather")]
+    feathers = [*d4.root.glob("metadata/*.feather")]
     assert len(feathers) == 6
     for feather in feathers:
       feather.unlink()
   def test_chunk_creation_B(self, dissertation_corpus_maker):
     d5 = dissertation_corpus_maker(5)
-    d5._create_bookstack_plan()
-    feathers = [*d5.root.glob("bookstacks/*.feather")]
+    feathers = [*d5.root.glob("metadata/*.feather")]
     assert len(feathers) == 3
     for feather in feathers:
       feather.unlink()
 
   def test_chunk_creation_C(self, dissertation_corpus_maker):
     d6 = dissertation_corpus_maker(6)
-    d6._create_bookstack_plan()
-    feathers = [*d6.root.glob("bookstacks/*.feather")]
+    feathers = [*d6.root.glob("metadata/*.feather")]
     assert len(feathers) == 2
+    for feather in feathers:
+      feather.unlink()
 
   def test_chunk_iteration(self, dissertation_corpus_maker):
     dissertation_corpus = dissertation_corpus_maker(4)
+    assert len(dissertation_corpus.bookstacks) == 3
     tb = pa.Table.from_batches([*dissertation_corpus.tokenization()])
     assert len(tb) == 12
 
 
-  def test_cached_chunk_iteration(self, dissertation_corpus):
-    dissertation_corpus._create_bookstack_plan(size = 4)
+  def test_cached_chunk_iteration(self, dissertation_corpus_maker):
+    dissertation_corpus = dissertation_corpus_maker(4)
     tb = pa.Table.from_batches([*dissertation_corpus.tokenization()])
     assert len(tb) == 12
 
@@ -80,8 +80,8 @@ class TestChunkPlan():
     assert len(tb) == 12
 
 class TestChunksSeparately():
-  def test_chunk_instantiation(self, dissertation_corpus):
-    d = dissertation_corpus._create_bookstack_plan(size = 4)
+  def test_chunk_instantiation(self, dissertation_corpus_maker):
+    dissertation_corpus = dissertation_corpus_maker(4)
     stack1 = Bookstack(dissertation_corpus, "00001")
     assert len(stack1.ids) == 4
 

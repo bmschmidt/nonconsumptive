@@ -118,7 +118,7 @@ class Corpus():
     self._stacks = None
 
   def batch_ids(self, uuid: str, id_type: str) -> Iterator[RecordBatch]:
-    assert id_type in ["_ncid", "@id"]
+    assert id_type in ["nc:id", "@id"]
     ids = BatchIDIndex(self)
     return ids.iter_ids(id_type)
 
@@ -271,14 +271,15 @@ class Corpus():
 
     bookstack_queue = Queue(threads)
     results_queue = Queue(threads * 2)
+    assert len(self.bookstacks) > 0, "No bookstacks to iterate over"
     for stack in self.bookstacks:
       transformation = stack.get_transform(key)
       if ids is None:
         yield from transformation
-      elif ids in {"@id", "_ncid"}:
+      elif ids in {"@id", "nc:id"}:
         yield from transformation.iter_with_ids(ids)
       else:
-        raise ValueError(f'ids must be in {"@id", "_ncid"}')
+        raise ValueError(f'ids must be in {"@id", "nc:id"}')
       
   def to_parquet(self, transformations = ["token_counts", "document_length", "SRP"]):
     # Writes a parquet file including derived metadata.
@@ -296,10 +297,12 @@ class Corpus():
       return self._stacks
 
     self._stacks = []
-    ids = self._create_bookstack_plan()
-    for id in ids:
-      if self.only_stacks is None or id in self.only_stacks:
-        self._stacks.append(Bookstack(self, id))
+    for f in self.metadata.path.glob("*.feather"):
+      name = f.with_suffix("").name
+      if self.only_stacks and name not in self.only_stacks:
+        continue
+      self._stacks.append(Bookstack(self, name))
+
     return self._stacks
 
   def audit(self, field):
@@ -328,10 +331,11 @@ class Corpus():
     id = self.metadata.tb.column("@id")[i].as_py()
     return Document(self, id)
 
+  """
   def _load_bookstack_plan(self, outdir):
-    """
+    ""
     Load a passed bookstack.
-    """
+    ""
     if self.input_bookstacks is None:
       return
     i = 0
@@ -341,49 +345,15 @@ class Corpus():
       tb = pa.table([
         id_slice,
         pa.array(range(i, top), pa.uint32())], 
-        names = ["@id", "_ncid"])
+        names = ["@id", "nc:id"])
       outpath = outdir / (f.with_suffix(".feather").name)
       feather.write_feather(tb, outpath, chunksize = 10_000_000)
       i += len(id_slice)
       yield f.with_suffix("").name
+  """
 
-  def _create_bookstack_plan(self, size = None):
 
-    dir = self.root / "bookstacks"
-    dir.mkdir(exist_ok = True)
-    stack_names = []
 
-    # First choice--self-created feather.
-    for p in dir.glob("*.feather"):
-      stack_names.append(p.with_suffix("").name)
-    if len(stack_names):
-      stack_names.sort()
-      return stack_names
-
-    # Second choice--learn from the on-disk parquet files
-    stack_names = [*self._load_bookstack_plan(dir)]
-    if len(stack_names):
-      stack_names.sort()
-      return stack_names
-    # Attempt to return existing plan.
-
-    # CUT--rewrite to a different block size. This is no longer allowed.
-
-    # Build a new plan.
-    cat_file = (self.metadata.path)
-      
-    i = 0
-    for stack in cat_file.glob("*.feather"):
-      id_slice = feather.read_table(stack, columns = ["@id"])['@id']
-      top = i + len(id_slice)
-      tb = pa.table([
-        id_slice,
-        pa.array(range(i, top), pa.uint32())], 
-        names = ["@id", "_ncid"])
-      feather.write_feather(tb, dir / stack.name, chunksize = len(tb) + 1)
-      stack_names.append(stack.with_suffix("").name)
-      i = top
-    return stack_names
 
   def multiprocess(self, task, processes = 6, stacks_per_process = 3):
     ids = [[]]

@@ -31,6 +31,7 @@ def tokenize(text):
 
 def tokenize_without_blingfire(texts : pa.Array):
   return pc.split_pattern_regex(texts, pattern = r"[^\p{L}]")
+
 def tokenize_arrow(texts : pa.Array) -> pa.Array:
   # Convert 
   # Altered from the blingfire source code at https://github.com/microsoft/BlingFire/blob/master/dist-pypi/blingfire/__init__.py
@@ -295,7 +296,7 @@ class EncodedCounts(ArrowReservoir):
 
   def build_schema(self) -> pa.Schema:
     schema = {
-      "_ncid": pa.uint32()
+      "nc:id": pa.uint32()
     }
     if (self.ngrams == 1):
       schema['wordid'] = pa.uint32()
@@ -351,7 +352,7 @@ class EncodedCounts(ArrowReservoir):
     so the join can be a bit more efficient.
     """
     offset = 0
-    ids = self.bookstack.ids['_ncid']
+    ids = self.bookstack.ids['nc:id']
     for batch in self._upstream:
       encoded = self.process_batch(batch)
       indices = batch[0].value_parent_indices()
@@ -360,7 +361,7 @@ class EncodedCounts(ArrowReservoir):
       id_col = pc.take(ids, indices).combine_chunks()
 
       cols = [id_col, *encoded]
-      names = ["_ncid", *[f.name for f in encoded.schema]]
+      names = ["nc:id", *[f.name for f in encoded.schema]]
       yield pa.record_batch(cols, names)
     self.close()
 

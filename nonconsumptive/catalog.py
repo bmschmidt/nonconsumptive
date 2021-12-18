@@ -209,9 +209,15 @@ class Catalog():
       start = 0
       end = 0
       i = 0
+
       while start < len(self.nc_catalog):
         end = start + self.batch_size
-        chunk = self.nc_catalog[start:end]      
+        if end >= len(self.nc_catalog):
+          end = len(self.nc_catalog)
+        chunk = self.nc_catalog[start:end]
+        # Create the integer ids.
+        # Extending an existing table will take more work.
+        chunk = chunk.append_column("nc:id", pa.array(range(start, end), type = pa.uint32()))
         feather.write_feather(chunk, self.final_location / f"{i:05d}.feather")
         start = end
         i += 1

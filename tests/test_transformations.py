@@ -61,7 +61,6 @@ class TestDocument():
 
 class TestBookstacks():
   def test_chunk_instantiation(self, dissertation_corpus):
-    d = dissertation_corpus._create_bookstack_plan()
     stack1 = Bookstack(dissertation_corpus, "00000")
     tokenization = stack1.get_transform("tokenization")
     for tokens in tokenization:
@@ -72,12 +71,12 @@ class TestBookstacks():
 
 class TestNgrams():
   def test_bigrams(self, dissertation_corpus):
-    d = dissertation_corpus._create_bookstack_plan()
+    d = dissertation_corpus.metadata
     stack1 = Bookstack(dissertation_corpus, "00000")
     bigrams = stack1.get_transform("bigrams")
     bigrams = pa.Table.from_batches([*bigrams]).to_pandas()
   def test_encoded_bigrams(self, dissertation_corpus):
-    d = dissertation_corpus._create_bookstack_plan()
+    d = dissertation_corpus.metadata
     stack1 = Bookstack(dissertation_corpus, "00000")
     bigrams = stack1.get_transform("encoded_bigrams")
     bigrams = pa.Table.from_batches([*bigrams]).to_pandas()
