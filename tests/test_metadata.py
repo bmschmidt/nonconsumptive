@@ -44,6 +44,12 @@ def non_metadata_corpus(tmpdir_factory):
                 metadata = None,                
                 dir = dir, text_options = {"format" : "txt"}, cache_set = {})
 
+class TestDatabasePrep():
+  def test_flat_metadata(self, dissertation_corpus):
+    dissertation_corpus.metadata.to_flat_catalog()
+
+
+
 class TestMetadata():
   def test_cat_alone_makes_metadata(self, dissertation_corpus):
     tb = dissertation_corpus.metadata.tb

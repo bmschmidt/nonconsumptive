@@ -50,6 +50,7 @@ class TestChunkPlan():
     assert len(feathers) == 6
     for feather in feathers:
       feather.unlink()
+
   def test_chunk_creation_B(self, dissertation_corpus_maker):
     d5 = dissertation_corpus_maker(5)
     feathers = [*d5.root.glob("metadata/*.feather")]
@@ -63,6 +64,12 @@ class TestChunkPlan():
     assert len(feathers) == 2
     for feather in feathers:
       feather.unlink()
+
+  def test_metadata_gets_text(self, dissertation_corpus_maker):
+    d6 = dissertation_corpus_maker(6)
+    feathers = [*d6.root.glob("metadata/*.feather")]
+    assert len(feathers) == 2
+    [*d6.text()]
 
   def test_chunk_iteration(self, dissertation_corpus_maker):
     dissertation_corpus = dissertation_corpus_maker(4)
@@ -88,3 +95,11 @@ class TestChunksSeparately():
     tokenization = stack1.get_transform("tokenization")
     for t in tokenization:
       assert len(t) > 1
+
+class TestMultiproessing():
+  def test_multiprocessing(self, dissertation_corpus_maker):
+    dissertation_corpus = dissertation_corpus_maker(4)
+    dissertation_corpus.multiprocess("tokenization", stacks_per_process = 1)
+    dissertation_corpus.total_wordcounts # To cache it
+    dissertation_corpus.multiprocess("encoded_unigrams")
+    

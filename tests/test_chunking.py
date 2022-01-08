@@ -36,7 +36,7 @@ class NewTestVolume():
         ids = []
         words = []
         counts = 0
-        for batch in simple_corpus.token_counts:
+        for batch in simple_corpus.unigrams:
             ids.append(batch.schema.metadata.get(b'id').decode("utf-8"))
             counts += sum(batch['count'].to_pylist())
             words = words + batch['token'].to_pylist()

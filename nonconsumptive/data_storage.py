@@ -304,14 +304,14 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
 
   One document per row, with some additional guarantees:
 
-  1. There is a single column, identified by self.name (namespaced as nc:token_counts, etc.).
+  1. There is a single column, identified by self.name (namespaced as nc:unigrams, etc.).
   2. That column may be a struct.
 
   And some benefits, not required to used.
   3. There is an upstream_arrays function that yields
      individual arrays.
-  4. There is a process_batch function of type array -> [array/structArray] that
-     generates individual column elements 
+  4. There is a process_doc with the column of type array -> [array/structArray] that
+     generates individual doc elements 
   
   """
 
@@ -329,8 +329,9 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
     if pa.types.is_struct(self.base_type):
       # The schema is a list of whatever the base_type here is.
       return pa.schema({
-        self.name: pa.list_(self.base_type)
-      })
+#        self.name: pa.list_(self.base_type)
+         self.name: self.base_type
+     })
     raise NotImplementedError(f"Unable to create line-by-line records for returned value of type {self.base_type}")
 
   def process_batch(self, batch: pa.RecordBatch) -> pa.RecordBatch:
@@ -346,20 +347,23 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
     else:
       raise NotImplementedError(f"No _upstream object set for class {self}")
 
-  def upstream_arrays(self) -> Iterator[pa.Array]:
+  def upstream_documents(self) -> Iterator[pa.RecordBatch]:
     # Yields one array per document.
     for batch in self.upstream():
       col_1 = batch.columns[0]
-      for row in col_1:
+      for i in range(len(col_1)):
         # Coerce to an array type.
-        yield row.values
+        yield pa.RecordBatch.from_arrays([
+          col_1[i][k].values for k in [*col_1[i].keys()]
+        ], [*col_1[i].keys()]
+        )
 
   def _from_upstream(self) -> Iterator[pa.RecordBatch]:
     rows : List[List[pa.Array]] = []
     row_offsets = [0]
     cache_size = 0
     # To grow the array, we append to a list in place. 
-    for array in self.upstream_arrays():
+    for array in self.upstream_documents():
       value = self.process_batch(array)
       rows.append(value)
       row_offsets.append(row_offsets[-1] + len(value))      

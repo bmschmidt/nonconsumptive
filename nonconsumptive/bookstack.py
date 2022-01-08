@@ -41,6 +41,7 @@ class Bookstack():
     self.transformations : dict = {}
     self.corpus = parent_corpus
     self.root = (parent_corpus).root
+    self._metadata = None
 
   @property
   def ids(self):
@@ -55,6 +56,13 @@ class Bookstack():
   def total_wordcounts(self):
     return self.corpus.total_wordcounts
 
+  @property
+  def metadata(self):
+    fin = (self.corpus.root / "metadata" / self.uuid).with_suffix(".feather")
+    if self._metadata is not None:
+      return self._metadata
+    self._metadata = feather.read_table(fin)
+    return self._metadata
   @property
   def bookstacks(self):
     raise RecursionError("A stack can't contain more stacks")
@@ -93,15 +101,17 @@ class Bookstacks:
         
     @property
     def schema(self):
-        f0 = self.files().__next__()
+        f0, *_ = self.files()
         return parquet.ParquetFile(f0).schema_arrow
     
     def meta(self):
         return [p.name for p in self.schema]
     
     def files(self):
-        for f in self.dir.glob("**/*.parquet"):
-            yield f
+      # List all the files in this bookstack in lexicographically sorted order.
+      fs = [*self.dir.glob("**/*.parquet")]
+      fs.sort()
+      return fs
             
     def __repr__(self):
         return f"A bookstack set at {self.dir} with {len([*self.files()])} stacks."

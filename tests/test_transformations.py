@@ -45,13 +45,13 @@ class TestDocument():
     total = 0
     n = 0
     stack = simple_corpus.bookstacks[0]    
-    for batch in stack.get_transform("token_counts"):
-        total += batch['token_counts'].flatten().flatten()[1].to_numpy().sum()
+    for batch in stack.get_transform("unigrams"):
+        total += batch['unigrams'].flatten()[1].flatten().to_numpy().sum()
     assert 42 <= total <= 43 # Different tokenizers produce slightly different results.
 
     total = 0
-    for batch in stack.get_transform("token_counts"):
-        total += batch['token_counts'].flatten().flatten()[1].to_numpy().sum()
+    for batch in stack.get_transform("unigrams"):
+        total += batch['unigrams'].flatten()[1].flatten().to_numpy().sum()
     assert 42 <= total <= 43 # Different tokenizers produce slightly different results.
 
 
@@ -65,7 +65,7 @@ class TestBookstacks():
     tokenization = stack1.get_transform("tokenization")
     for tokens in tokenization:
         pass
-    counts = stack1.get_transform("token_counts")
+    counts = stack1.get_transform("unigrams")
     for counts in counts:
         pass
 
@@ -75,6 +75,7 @@ class TestNgrams():
     stack1 = Bookstack(dissertation_corpus, "00000")
     bigrams = stack1.get_transform("bigrams")
     bigrams = pa.Table.from_batches([*bigrams]).to_pandas()
+    
   def test_encoded_bigrams(self, dissertation_corpus):
     d = dissertation_corpus.metadata
     stack1 = Bookstack(dissertation_corpus, "00000")

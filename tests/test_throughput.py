@@ -22,11 +22,10 @@ class TestTables():
         tb = simple_corpus.table("tokenization")   
         assert len(tb) == 3
         assert 40 < len(pc.list_flatten(tb['tokenization'])) < 44
-    def test_tokencounts_table(self, simple_corpus):
-        tb = simple_corpus.table("token_counts")   
+    def test_unigram_table(self, simple_corpus):
+        tb = simple_corpus.table("unigrams")['unigrams']
         assert len(tb) == 3
-        as_rows = tb.to_pandas()['token_counts'].explode()
-        total = as_rows.apply(lambda x: x['count']).sum()
+        total = tb.to_pandas().apply(lambda x: x['count']).explode().sum()
 
         assert 40 <= total <= 44
 
@@ -51,10 +50,10 @@ class TestIteration():
     def test_wordcount_iteration(self, simple_corpus):
         words = []
         total = 0
-        tb = pa.Table.from_batches([*simple_corpus.token_counts()])
-        words, counts = tb['token_counts'].combine_chunks().flatten().flatten()
-        total = pc.sum(counts).as_py()
-        words = words.to_pylist()
+        tb = pa.Table.from_batches([*simple_corpus.unigrams()])
+        words, counts = tb['unigrams'].combine_chunks().flatten()
+        total = pc.sum(counts.flatten()).as_py()
+        words = words.flatten().to_pylist()
         assert "wife" in words
         assert "каждая" in words
         assert 42 <= total <= 43

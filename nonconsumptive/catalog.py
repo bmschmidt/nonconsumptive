@@ -101,6 +101,7 @@ class Catalog():
         file = final_location
 
       self.file = Path(file)
+      self.stacks = None
 
       if self.file.is_dir():
         self.raw_tb = file
@@ -162,7 +163,8 @@ class Catalog():
         raise NotImplementedError(f"Unable to load metadata information: strategy for format {self.format}")
 
     def load_bookstacks(self, path):
-      self.raw_tb = Bookstacks(self.file).metadata()
+      self.stacks = Bookstacks(self.file)
+      self.raw_tb = self.stacks.metadata()
 
     def load_feather(self, file):      
       self.raw_tb = pa.feather.read_table(file)
@@ -199,10 +201,12 @@ class Catalog():
         role = None
         if name == self.id_field:
           role = "identifier"
+        print(name)
         col = Column(self.raw_tb[name], name, role)
         fields.append(col.field())
       schemas, columns = zip(*fields)
-      self.tb = pa.table(columns, schema = pa.schema(schemas, metadata = {'nonconsumptive': json.dumps(self.metadata)}))
+      self.tb = pa.table(columns, schema = pa.schema(schemas,
+         metadata = {'nonconsumptive': json.dumps(self.metadata)}))
       return self.tb
 
     def serialize_to_feather(self):
@@ -210,15 +214,34 @@ class Catalog():
       end = 0
       i = 0
 
+      names = []
+      lengths = []
+
+      if self.stacks is not None:
+        for stack in self.stacks.files():
+          name = stack.with_suffix('').name
+          f = parquet.ParquetFile(stack)
+          names.append(name)
+          lengths.append(f.metadata.num_rows)
+
       while start < len(self.nc_catalog):
-        end = start + self.batch_size
+        if self.stacks is not None:
+          end += lengths.pop(0)
+        else:
+          end = start + self.batch_size
         if end >= len(self.nc_catalog):
           end = len(self.nc_catalog)
         chunk = self.nc_catalog[start:end]
         # Create the integer ids.
         # Extending an existing table will take more work.
         chunk = chunk.append_column("nc:id", pa.array(range(start, end), type = pa.uint32()))
-        feather.write_feather(chunk, self.final_location / f"{i:05d}.feather")
+        if self.stacks is not None:
+          print("USING BOOKSTACK NAME")
+          name = Path(names.pop(0))
+        else:
+          print("USING BASIC NAME")
+          name = Path(str(i).zfill(5))
+        feather.write_feather(chunk, self.final_location / name.with_suffix(".feather"))
         start = end
         i += 1
 
@@ -318,7 +341,7 @@ class Column():
 
       dictionary = idLookup[self.name].combine_chunks()
       for chunks in self.c.chunks:
-        indices = pc.index_in(self.c, value_set=dictionary).cast(nt).combine_chunks()
+        indices = pc.index_in(chunks, value_set=dictionary).cast(nt)#.combine_chunks()
         arr = pa.DictionaryArray.from_arrays(
           indices,
           dictionary,

@@ -126,50 +126,48 @@ class Metadata(object):
 
     logger.info("Reading full catalog")
 
-    raise NotImplementedError("Must rewrite to use full catalog set.")
-    tab = ipc.open_file(self.path)
-    logger.debug(f"read file with schema {tab.schema.names}")
-
     writers = dict()
     written_meta = 0
+    for path in self.path.glob("*.feather"):
+      tab = ipc.open_file(path)
+      logger.debug(f"read file with schema {tab.schema.names}")
+      for i in range(tab.num_record_batches):
+        batch = tab.get_batch(i)
+        logging.debug(f"ingesting metadata batch {i}, {written_meta} items written total.")
+        dict_tables = set()
 
-    for i in range(tab.num_record_batches):
-      batch = tab.get_batch(i)
-      logging.debug(f"ingesting metadata batch {i}, {written_meta} items written total.")
-      dict_tables = set()
-
-      tables : Dict[str, dict] = defaultdict(dict)
-      tables['fastcat']['nc:id'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
-      tables['catalog']['nc:id'] = tables['fastcat']['nc:id']
-      for name, col in zip(batch.schema.names, batch.columns):
-        if pa.types.is_string(col.type):
-          tables['catalog'][name] = col
-        elif pa.types.is_integer(col.type) or pa.types.is_date(col.type):
-          tables['catalog'][name] = col
-          tables['fastcat'][name] = col
-        elif pa.types.is_dictionary(col.type):
-          dict_tables.add(name)
-          tables['fastcat'][f'{name}__id'] = col.indices   
-          tables['catalog'][name] = col.dictionary.take(col.indices)
-        elif pa.types.is_list(col.type):
-          tname = name
-          parents = col.value_parent_indices()
-          tables[tname]['nc:id'] = tables['fastcat']['nc:id'].take(parents)
-          flat = col.flatten()
-          if pa.types.is_dictionary(col.type):
+        tables : Dict[str, dict] = defaultdict(dict)
+        tables['fastcat']['nc:id'] = pa.array(np.arange(written_meta, written_meta + len(batch)))
+        tables['catalog']['nc:id'] = tables['fastcat']['nc:id']
+        for name, col in zip(batch.schema.names, batch.columns):
+          if pa.types.is_string(col.type):
+            tables['catalog'][name] = col
+          elif pa.types.is_integer(col.type) or pa.types.is_date(col.type):
+            tables['catalog'][name] = col
+            tables['fastcat'][name] = col
+          elif pa.types.is_dictionary(col.type):
             dict_tables.add(name)
-            tables[tname][tname + "__id"] = flat.indices()
+            tables['fastcat'][f'{name}__id'] = col.indices   
+            tables['catalog'][name] = col.dictionary.take(col.indices)
+          elif pa.types.is_list(col.type):
+            tname = name
+            parents = col.value_parent_indices()
+            tables[tname]['nc:id'] = tables['fastcat']['nc:id'].take(parents)
+            flat = col.flatten()
+            if pa.types.is_dictionary(col.type):
+              dict_tables.add(name)
+              tables[tname][tname + "__id"] = flat.indices()
+            else:
+              tables[tname][tname] = flat
           else:
-            tables[tname][tname] = flat
-        else:
-          logger.error("WHAT IS ", name)
-          raise
-      for table_name in tables.keys():
-        loc_batch = pa.table(tables[table_name])
-        if not table_name in writers:
-          writers[table_name] = parquet.ParquetWriter(outpath / (table_name + ".parquet"), loc_batch.schema)
-        writers[table_name].write_table(loc_batch)
-      written_meta += len(batch)
+            logger.error("WHAT IS ", name)
+            raise
+        for table_name in tables.keys():
+          loc_batch = pa.table(tables[table_name])
+          if not table_name in writers:
+            writers[table_name] = parquet.ParquetWriter(outpath / (table_name + ".parquet"), loc_batch.schema)
+          writers[table_name].write_table(loc_batch)
+        written_meta += len(batch)
 
     for name in dict_tables:
       # dictionaries can be written just once, using the final batch

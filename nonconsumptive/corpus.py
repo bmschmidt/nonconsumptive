@@ -76,6 +76,7 @@ class Corpus():
     self.root.mkdir(exist_ok = True)
     self.only_stacks = only_stacks
     self.batch_size = batching_options["batch_size"]
+    self.text_options = text_options
     # A place where children can stash things they need to create 
     # themselves. Use with care, because not thread-safe.
     self.slots : Dict[str, Any]= {}
@@ -140,17 +141,12 @@ class Corpus():
     self.text_location = texts
 
     if from_metadata:
-      self._texts = MetadataInput(texts, text_field = metadata_field, **kwargs)
+      self._texts = MetadataInput(metadata_field = metadata_field, corpus = self, **kwargs)
       return
     if texts.is_dir():
       self._texts = FolderInput(texts, **kwargs)
     else:
-      self._texts =  SingleFileInput(texts, self, **kwargs)
-
-  def clean(self, targets: List[str] = ['metadata', 'tokenization', 'token_counts']):
-    import shutil
-    for d in targets:
-      shutil.rmtree(self.root / d)
+      self._texts =  SingleFileInput(texts, corpus = self, **kwargs)
 
   @property
   def metadata(self) -> Metadata:
@@ -179,7 +175,7 @@ class Corpus():
     cache_loc = self.root / "wordids.feather"
     if cache_loc.exists():
       logger.debug("Loading word counts from cache")
-      self._total_wordcounts = feather.read_table(cache_loc)
+      self._total_wordcounts = feather.read_table(cache_loc)[:1_000_000]
       return self._total_wordcounts
 
     logger.info("Building word counts")
@@ -193,12 +189,13 @@ class Corpus():
     # Avoids a bunch of unnecessary typescasts and 
     # unparallelized additions.
     for i, bstack in enumerate(self.bookstacks):
-      transform = bstack.get_transform("token_counts")
+      transform = bstack.get_transform("unigrams")
       for wordcounts in transform:
           # First merge the documents; then split words from counts
-          wordcounts = wordcounts['token_counts'].flatten()
-          stack.append(pa.RecordBatch.from_struct_array(wordcounts))
-          stack_size += wordcounts.nbytes
+          tokens, counts = wordcounts[0].flatten()
+          batch = pa.record_batch([tokens.flatten(), counts.flatten()], ['token', 'count'])
+          stack.append(batch)
+          stack_size += batch.nbytes
           # Use one-tenth the stack size to store here.
           if stack_size >= (MAX_MEGABYTES * 1024 * 1024 / 10) or i == (len(self.bookstacks) - 1):
             logging.debug("Writing to bounter")
@@ -231,8 +228,8 @@ class Corpus():
       self._total_wordcounts = tb
       return tb
 
-  def token_counts(self):
-    yield from self.iter_over("token_counts")
+  def unigrams(self):
+    yield from self.iter_over("unigrams")
   
   def encoded_wordcounts(self):
     # Enforce complete build of the wordcounts first.
@@ -281,7 +278,7 @@ class Corpus():
       else:
         raise ValueError(f'ids must be in {"@id", "nc:id"}')
       
-  def to_parquet(self, transformations = ["token_counts", "document_length", "SRP"]):
+  def to_parquet(self, transformations = ["unigrams", "document_length", "SRP"]):
     # Writes a parquet file including derived metadata.
     schema = self.metadata.load_processed_catalog(columns = None)
     
@@ -309,17 +306,19 @@ class Corpus():
     for stack in self.bookstacks:
       pass
 
+  """
   @property
   def wordids(self):
-    """
+    ""
     Returns wordids in a dict format. 
-    """
+    ""
     logger.warning("Using dict method for wordids, which is slower.")
     w = self.total_wordcounts
     tokens = w['token']
     counts = w['count']
     return dict(zip(tokens.to_pylist(), counts.to_pylist()))
-           
+  """
+
   def first(self) -> Document:
     for doc in self.documents:
       break
@@ -351,9 +350,6 @@ class Corpus():
       i += len(id_slice)
       yield f.with_suffix("").name
   """
-
-
-
 
   def multiprocess(self, task, processes = 6, stacks_per_process = 3):
     ids = [[]]

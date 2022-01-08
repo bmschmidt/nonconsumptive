@@ -37,7 +37,7 @@ class TextInput():
   def __getitem__(self, key):
     raise NotImplementedError("This text input type does not support random item access.")
 
-  def iter_texts_for_ids(self, ids):
+  def iter_texts_for_ids(self, ids : pa.Array):
     for id in ids:
       id = id.as_py()
       yield self[id]
@@ -51,21 +51,23 @@ class InputFeather(ArrowReservoir):
     arrow_schema = pa.schema({"@id": pa.string(), "text": pa.string()})
     name = "input_feather"
     def __init__(self, corpus, fin, format = "txt"):
-        self.fin = Path(fin)
-        self.text_cache = []
-        self.id_cache = []
-        self.text_cache_size = []
-        self.format = format
-        if self.format != "txt":
-          raise NotImplementedError("Only txt input supported right now.")
-        super().__init__(corpus)
-        self.uuid = "input"
+      assert corpus is not None
+      self.fin = Path(fin)
+      self.text_cache = []
+      self.id_cache = []
+      self.text_cache_size = []
+      self.format = format
+      if self.format != "txt":
+        raise NotImplementedError("Only txt input supported right now.")
+      super().__init__(corpus)
+      self.uuid = "input"
 
-    
+    """
     @property
     def filepath(self):
         return self.corpus.root / "input.feather"
-    
+    """ 
+
     @property
     def input_txt(self):
         infile = Path(self.fin)
@@ -77,6 +79,9 @@ class InputFeather(ArrowReservoir):
         return file
 
     def _from_upstream(self):
+      if self.format != "txt":
+        raise NotImplementedError("Not implemented")
+      elif self.format=="txt":
         errored = []
         seen = set([])
         logger.info(f"Constructing feather version of {self.fin}")
@@ -164,9 +169,8 @@ class MetadataInput(TextInput):
   Rather than expensively parse multiple times, the best practice here is to convert to 
   feather *once* and then extract text and ids from the metadata column.
   """
-  def __init__(self, path, text_field = "text", corpus = None, **kwargs):
-    self.text_field = text_field
-    self.path = path
+  def __init__(self, corpus, metadata_field : str, **kwargs):
+    self.metadata_field = metadata_field
     self._tb = None
     super().__init__(corpus)
 
@@ -174,42 +178,39 @@ class MetadataInput(TextInput):
     try:
       indices = pc.index_in(ids, value_set = self.tb["@id"])
     except pa.ArrowNotImplementedError:
-      logger.warning(f"Error with {self.path}:")
+      logger.warning(f"Error loading metadata")
       raise
     for index in indices:
-      yield self.tb[self.text_field][index.as_py()].as_py()
+      yield self.tb[self.metadata_field][index.as_py()].as_py()
+
+  def __getitem__(self, key):
+    for k in self.iter_texts_for_ids([key]):
+      return k
 
   @property
   def tb(self):
     if self._tb is not None:
       return self._tb
-    tbs = []
-    for path in self.path.glob("*.feather"):
-      t = feather.read_table(path,
-        columns = [self.text_field, "@id"])
-      tbs.append(t)
-    self._tb = pa.concat_tables(tbs)
-    return self._tb
+    meta = self.corpus.metadata
+    return meta.tb.select(["@id", self.metadata_field])
     
   def ids(self) -> Iterator[str]:
     if self.corpus.uuid is None:
-      for id in self._tb["@id"]:
+      for id in self.tb["@id"]:
         yield id.as_py()
     else:
-      for id in feather.read_table(self.corpus.root / f"bookstacks/{self.corpus.uuid}.feather")['@id']:
+      for id in feather.read_table(self.corpus.root / f"metadata/{self.corpus.uuid}.feather")['@id']:
         yield id
 
   def __iter__(self) -> Iterator[str]:
-    for text in feather.read_table(self.path, columns = [self.text_field])[self.text_field]:
+    for text in self.tb[self.metadata_field]:
       yield text.as_py()
-    
-
 
 class SingleFileInput(MetadataInput):
   __doc__ = """
 
   One text per line (no returns in any document).
-  id field separated from the rest of the doucment by a tab.
+  id field separated from the rest of the document by a tab.
   (no tabs allowed in id.)
 
   This format is immediately transformed into a feather-based file at 
@@ -217,16 +218,38 @@ class SingleFileInput(MetadataInput):
 
   """
   def __init__(self,
-    dir:Path = Path("input.txt"),
+    path:Path = Path("input.txt"),
     corpus: Optional["Corpus"] = None,
     compression: Optional[str] = None,
-    format: str = "txt"):
+    format: str = "txt", **kwargs):
+    self.metadata_field = "text"
+    assert corpus is not None, "Error: corpus must be specified."
 
-    self.transformed_input = InputFeather(corpus, dir, format)
+
+    self.transformed_input = InputFeather(corpus=corpus, fin = path, format = format)
+
     self.transformed_input.build_cache()
-
-    super().__init__(
-      path = self.transformed_input.filepath,
-      text_field = "text",
-      corpus = corpus
-      )
+    self._tb = None
+    self.corpus = corpus
+#    super().__init__(
+#      metadata_field = corpus.text_options['metadata_field'],
+#      corpus = corpus,
+#      **kwargs
+#      )
+    
+  @property
+  def tb(self):
+    """
+    We read through the input feather to get the individual tables
+    """
+    if self._tb is not None:
+      return self._tb
+    tbs = []
+    ps = [*self.transformed_input.path.glob("*.feather")]
+    assert len(ps) > 0
+    for path in ps:
+      t = feather.read_table(path,
+        columns = [self.metadata_field, "@id"])
+      tbs.append(t)
+    self._tb = pa.concat_tables(tbs)
+    return self._tb

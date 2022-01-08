@@ -76,29 +76,10 @@ class Document(BaseDocument):
   def metadata(self):
     return self.corpus.metadata.get(self.id)
 
-#  def chunked_wordcounts(self, chunk_size) -> pa.RecordBatch:
-#    """
-#   As with the core elements 
-#    """
-#    return chunked_wordcounts(self.tokens, chunk_size)
-
-"""
-  @property
-  def wordcounts(self) -> pa.RecordBatch:
-    c = pa.RecordBatch.from_struct_array(self.tokens['token'].value_counts())
-    return pa.record_batch(
-      [c['values'],c['counts'].cast(pa.uint32())], 
-    schema = pa.schema(
-      {"token": pa.utf8(),
-      "count": pa.uint32()},
-      metadata={'nc_metadata': json.dumps(self.metadata, default=str)})
-    )
-"""
-
 def tokenize(string) -> pa.Array:
     return pa.array(re.findall(r"[\w^_]+|[^\w\s]+", string))
 
-def token_counts(tokens: pa.Array, id: str) -> pa.RecordBatch:
+def unigrams(tokens: pa.Array, id: str) -> pa.RecordBatch:
   c = pa.RecordBatch.from_struct_array(tokens.value_counts())
   return pa.record_batch(
     [c['values'],c['counts'].cast(pa.uint32())], 

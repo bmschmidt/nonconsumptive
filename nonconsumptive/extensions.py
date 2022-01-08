@@ -33,7 +33,7 @@ def embed_to_SRP(corpus: Corpus, filepath = None, dims = 1280, flush_every = 512
   bits = []
   hashed = []
   fout = ipc.new_file(filepath, schema = schema)
-  for i, batch in enumerate(corpus.token_counts()):
+  for i, batch in enumerate(corpus.unigrams()):
     id = batch_id(batch)
     tokens = batch['token'].to_pylist()
     counts = batch['count'].to_numpy()

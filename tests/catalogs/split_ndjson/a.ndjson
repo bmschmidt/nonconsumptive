@@ -1,0 +1,2 @@
+{"id": "1", "nc:text": "some text", "labels": "a"}
+{"id": "2", "nc:text": "some text", "labels": ["b", "c"]}

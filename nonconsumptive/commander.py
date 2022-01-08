@@ -80,7 +80,7 @@ def add_builder_parameters(build_parser):
     default=Path("nonconsumptive")
   )
   build_parser.add_argument("--only-stacks", type = str, nargs = '+', help = ""
-    "Build with only a subset of the possible bookstacks. Mostly useful for distributed processing ",
+    "Build with only a subset of the possible bookstacks. Mostly useful for exotic distributed processing ",
     default=None
   )
   build_parser.add_argument("--bookstacks", type = Path, help = ""
@@ -96,6 +96,12 @@ build_parser.add_argument("--targets", type = str, nargs='+',
   "If not passed will look for a field called '@id', 'filename', or 'id'.",
   choices = transformations)
 
+parallelizable = set([
+  "tokenization",
+  *[f"encoded{x}" for x in ['unigrams', 'bigrams', 'trigrams']],
+  *[x for x in ['unigrams', 'bigrams', 'trigrams']],
+])
+
 def main(args = None):
   if args is None:
     parsed_args = parser.parse_args()
@@ -103,5 +109,8 @@ def main(args = None):
     parsed_args = parser.parse_args(args)
   corpus = Corpus(**namespace_to_kwargs(parsed_args))
   for target in parsed_args.targets:
-    corpus.cache(target)
+    if target in parallelizable:
+      corpus.multiprocess(target)
+    else:
+      corpus.cache(target)
   pass
