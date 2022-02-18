@@ -310,7 +310,7 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
   And some benefits, not required to used.
   3. There is an upstream_arrays function that yields
      individual arrays.
-  4. There is a process_doc with the column of type array -> [array/structArray] that
+  4. ??? There is a process_doc with the column of type array -> [array/structArray] that
      generates individual doc elements 
   
   """

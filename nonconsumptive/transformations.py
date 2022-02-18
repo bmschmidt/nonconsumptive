@@ -165,7 +165,7 @@ class SRP_Transform(ArrowIdChunkedReservoir):
 
   def process_batch(self, counts: pa.Array) -> pa.Array:
     # Count the words, and cast to uint32.
-    words, counts = counts.flatten()
+    words, counts = counts.flatten().flatten()
     try:
       hashed = self.hasher.stable_transform(words.to_pylist(), counts.to_numpy())
       # bit_rep = np.packbits(hashed > 0).tobytes()
@@ -204,37 +204,42 @@ class Ngrams(ArrowIdChunkedReservoir):
 
   @property
   def base_type(self):
-    return pa.struct([
-      *[pa.field(f"word{i}", pa.list_(pa.string())) for i in range(self.ngrams)],
-      pa.field("count", pa.list_(pa.uint32()))])
+    return pa.list_(pa.struct([
+      *[pa.field(f"word{i}", pa.string()) for i in range(self.ngrams)],
+      pa.field("count", pa.uint32())]))
 
   def _from_upstream(self):
     ngrams = self.ngrams
     wordcols = [f"word{i}" for i in range(ngrams)]
+    cols = [*wordcols, "count"]
     for batch in self._upstream:
       counted = pl.DataFrame(pa.Table.from_batches([batch]))\
         .with_row_count()\
-        .explode("tokenization")\
-        .lazy()\
+        .explode("tokenization" # add lazy() below here.
+        )\
         .select(['row_nr',
-        *[pl.col("tokenization").shift(-i).over('row_nr').flatten().alias(f"word{i}") for i in range(ngrams)],
-        ])\
-        .groupby(['row_nr', *wordcols])\
-        .agg([pl.count('row_nr').alias("count")])\
-        .groupby(['row_nr'])\
-        .agg([
-          *[pl.col(w) for w in wordcols],
-          pl.col("count")
-        ])\
-        .sort(["row_nr"])\
-        .collect().to_arrow().combine_chunks()
+          *[pl.col("tokenization").shift(-i).over('row_nr').alias(f"word{i}") for i in range(ngrams)]
+          ])\
+          .groupby(['row_nr',  *wordcols])\
+          .count()\
+          .sort(["row_nr", *wordcols])\
+          .filter(pl.col(wordcols[-1]).is_not_null())\
+          .to_arrow().combine_chunks()
       # Convert the columns from polars into a single struct column.
+#      batched = pa.StructArray.from_arrays([counted[w].combine_chunks() for w in cols], cols)[0]      
+
       structed = pa.StructArray.from_arrays(
-        [
-          *[counted[f'word{i}'].combine_chunks().cast(pa.list_(pa.string())) for i in range(self.ngrams)],
-          counted['count'].combine_chunks().cast(pa.list_(pa.uint32()))],
-        [*wordcols, "count"])
-      yield pa.record_batch([structed], [self.name])
+      [
+        *[counted[c].combine_chunks().cast(pa.string()) for c in wordcols],
+        counted['count'].combine_chunks().cast(pa.uint32())],
+          cols
+      )
+
+      leading = pa.concat_arrays([pa.array([2*32-1], pa.uint32()), counted['row_nr'].combine_chunks()])
+      nesting = pc.indices_nonzero(pc.not_equal(counted['row_nr'], leading[:-1])).cast(pa.int32())
+      nest = pa.concat_arrays([nesting, pa.array([len(counted)], pa.int32())])
+      nested_struct = pa.ListArray.from_arrays(nest, structed)
+      yield pa.record_batch([nested_struct], [self.name])
 
 class Unigrams(Ngrams):
   """
@@ -307,11 +312,11 @@ class EncodedCounts(ArrowReservoir):
 
     # The first flatten combines chunks, and the second
     # disentangles the struct columns ['word1', 'count'].
-    arrays = batch[0].flatten()
-    offsets = arrays[0].offsets
-    stride = len(arrays[0].flatten())
+    arrays = batch[0].flatten().flatten()
+    offsets = batch[0].offsets
+    stride = len(arrays[0])
     # Array them end to end so the lookup can happen in a single pass.
-    words = pa.chunked_array([array.values for array in arrays[:-1]])
+    words = pa.chunked_array([array for array in arrays[:-1]])
     encoded = pc.index_in(words, value_set = self.wordids).cast(pa.uint32())
 
     # Stupid--for back-compatibility, to allow one-grams to have a different name in their table.
@@ -323,7 +328,7 @@ class EncodedCounts(ArrowReservoir):
         for n in range(self.ngrams)
       }
    
-    derived['count'] = arrays[-1].cast(pa.list_(pa.uint32()))
+    derived['count'] = pa.ListArray.from_arrays(offsets, arrays[-1].cast(pa.uint32()))
 
     return pa.record_batch([derived[k] for k in derived.keys()], names = [*derived.keys()])
 

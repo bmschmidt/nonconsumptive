@@ -46,12 +46,12 @@ class TestDocument():
     n = 0
     stack = simple_corpus.bookstacks[0]    
     for batch in stack.get_transform("unigrams"):
-        total += batch['unigrams'].flatten()[1].flatten().to_numpy().sum()
+        total += batch['unigrams'].flatten().flatten()[1].to_numpy().sum()
     assert 42 <= total <= 43 # Different tokenizers produce slightly different results.
 
     total = 0
     for batch in stack.get_transform("unigrams"):
-        total += batch['unigrams'].flatten()[1].flatten().to_numpy().sum()
+        total += batch['unigrams'].flatten().flatten()[1].to_numpy().sum()
     assert 42 <= total <= 43 # Different tokenizers produce slightly different results.
 
 

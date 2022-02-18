@@ -22,12 +22,7 @@ class TestTables():
         tb = simple_corpus.table("tokenization")   
         assert len(tb) == 3
         assert 40 < len(pc.list_flatten(tb['tokenization'])) < 44
-    def test_unigram_table(self, simple_corpus):
-        tb = simple_corpus.table("unigrams")['unigrams']
-        assert len(tb) == 3
-        total = tb.to_pandas().apply(lambda x: x['count']).explode().sum()
 
-        assert 40 <= total <= 44
 
 class TestIteration():
     def test_text_iteration(self, simple_corpus):
@@ -51,9 +46,9 @@ class TestIteration():
         words = []
         total = 0
         tb = pa.Table.from_batches([*simple_corpus.unigrams()])
-        words, counts = tb['unigrams'].combine_chunks().flatten()
-        total = pc.sum(counts.flatten()).as_py()
-        words = words.flatten().to_pylist()
+        words, counts = tb['unigrams'].combine_chunks().flatten().flatten()
+        total = pc.sum(counts).as_py()
+        words = words.to_pylist()
         assert "wife" in words
         assert "каждая" in words
         assert 42 <= total <= 43
@@ -77,6 +72,7 @@ class TestIteration():
         for letter in "abг":
             assert letter in lookup
 
+    @pytest.mark.skip(reason="not sure I want the dict interface")
     def test_basic_wordids(self, simple_corpus):
         wordids = simple_corpus.wordids
         for word in ["wife", "fortune", "каждая"]:

@@ -192,8 +192,8 @@ class Corpus():
       transform = bstack.get_transform("unigrams")
       for wordcounts in transform:
           # First merge the documents; then split words from counts
-          tokens, counts = wordcounts[0].flatten()
-          batch = pa.record_batch([tokens.flatten(), counts.flatten()], ['token', 'count'])
+          tokens, counts = wordcounts[0].flatten().flatten()
+          batch = pa.record_batch([tokens, counts], ['token', 'count'])
           stack.append(batch)
           stack_size += batch.nbytes
           # Use one-tenth the stack size to store here.
