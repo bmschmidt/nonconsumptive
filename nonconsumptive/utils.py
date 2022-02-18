@@ -2,6 +2,7 @@ import pyarrow as pa
 from pyarrow import parquet
 import pandas as pd # For now!
 from pathlib import Path
+from typing import List
 
 class ConsumptionError(Exception):
   pass
@@ -67,7 +68,7 @@ class BookstackBuilder():
     self.current_docs_in_file = 0
     self.file_num = 0
     self.max_docs_in_batch = max_docs_in_batch
-    self.cache = []
+    self.cache : List[dict] = []
 
   @property
   def current_writer(self):

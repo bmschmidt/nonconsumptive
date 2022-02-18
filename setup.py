@@ -9,8 +9,8 @@ setup(name='nonconsumptive',
       license='MIT',
       packages=['nonconsumptive'],
       install_requires=[
-          'pyarrow',
-          'polars',
+          'pyarrow>=7.0.0',
+          'polars>=0.13.1',
           'pysrp',
           "pyyaml",
           "bounter"

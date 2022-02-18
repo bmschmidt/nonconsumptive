@@ -12,8 +12,8 @@ logger = logging.getLogger("nonconsumptive")
 import polars as pl
 
 # Placeholders.
-SRP = None
-np = None
+SRP = None # type: ignore
+np = None # type: ignore
 
 try:
   import blingfire
@@ -163,11 +163,10 @@ class SRP_Transform(ArrowIdChunkedReservoir):
     self.corpus.slots['SRP_hasher'] = hasher
     return hasher
 
-  def process_batch(self, counts: pa.Array) -> pa.Array:
+  def process_batch(self, counts: pa.RecordBatch) -> pa.Array:
     # Count the words, and cast to uint32.
-    words, counts = counts.flatten().flatten()
     try:
-      hashed = self.hasher.stable_transform(words.to_pylist(), counts.to_numpy())
+      hashed = self.hasher.stable_transform(counts[0].to_pylist(), counts[1].to_numpy())
       # bit_rep = np.packbits(hashed > 0).tobytes()
 
     except SRP.EmptyTextError:

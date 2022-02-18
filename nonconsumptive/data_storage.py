@@ -353,10 +353,8 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
       col_1 = batch.columns[0]
       for i in range(len(col_1)):
         # Coerce to an array type.
-        yield pa.RecordBatch.from_arrays([
-          col_1[i][k].values for k in [*col_1[i].keys()]
-        ], [*col_1[i].keys()]
-        )
+        row = col_1.take([i]).flatten()
+        yield pa.RecordBatch.from_struct_array(row)
 
   def _from_upstream(self) -> Iterator[pa.RecordBatch]:
     rows : List[List[pa.Array]] = []

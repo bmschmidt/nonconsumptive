@@ -199,9 +199,10 @@ class Corpus():
           # Use one-tenth the stack size to store here.
           if stack_size >= (MAX_MEGABYTES * 1024 * 1024 / 10) or i == (len(self.bookstacks) - 1):
             logging.debug("Writing to bounter")
-            stuck : pl.DataFrame = pl.from_arrow(pa.Table.from_batches(stack))
+            tab : pa.DataFrame = pa.Table.from_batches(stack)
+            stuck = pl.from_arrow(tab)
             stack = []
-            count = stuck.groupby("token")['count'].sum()
+            count = stuck.groupby("token")['count'].sum() # type: ignore
             del stuck
             stack_size = 0
             #logger.info(f"Flushing counts at bookstack {i} size {stack_size / 1024 / 1024:.02f}MB")

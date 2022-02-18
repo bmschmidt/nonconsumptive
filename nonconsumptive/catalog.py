@@ -311,7 +311,7 @@ class Column():
         raise TypeError("Unable to cast between times")
       datelike_share = pc.mean(pc.match_substring_regex(self.c, "[0-9]{3,4}-[0-1]?[0-9]-[0-3]?[0-9]").cast(pa.int8()))
       if pc.greater(datelike_share, pa.scalar(.95)).as_py():
-        series = self.pl.str.strptime(pl.datatypes.Date, "%Y-%m-%d")
+        series = self.pl.str.strptime(pl.datatypes.Date, "%Y-%m-%d", strict = False)
         return series.to_arrow()
       else:
         raise ValueError(f"only {datelike_share} of values look like a date string.")
