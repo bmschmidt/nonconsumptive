@@ -61,7 +61,7 @@ def tokenize_arrow(texts : pa.Array) -> pa.Array:
     pa.array(as_bytes, pa.string()),
   pattern = " ")
 
-class Text(ArrowLineChunkedReservoir):
+class Text(ArrowIdChunkedReservoir):
   """
   Represents text as an arrow string.
   """
@@ -93,7 +93,7 @@ class Text(ArrowLineChunkedReservoir):
         current_size = 0
     yield pa.RecordBatch.from_arrays([pa.array(current_batch, pa.string())], ["text"])
 
-class Tokenization(ArrowLineChunkedReservoir):
+class Tokenization(ArrowIdChunkedReservoir):
   name = "tokenization"
   arrow_schema = pa.schema({"tokenization": pa.list_(pa.string())})
 
@@ -110,7 +110,7 @@ class Tokenization(ArrowLineChunkedReservoir):
       yield pa.RecordBatch.from_arrays([array], ['tokenization'])
 
 
-class DocumentLengths(ArrowLineChunkedReservoir):
+class DocumentLengths(ArrowIdChunkedReservoir):
   name = "document_lengths"
   arrow_schema = pa.schema({"nwords": pa.uint32()})
 
@@ -173,6 +173,20 @@ class SRP_Transform(ArrowIdChunkedReservoir):
       hashed = np.full(1280, np.sqrt(1280), np.float32)
     return pa.array(hashed)
 
+class SRP_bits(ArrowIdChunkedReservoir):
+  name = "SRP_bits"
+  arrow_schema = pa.schema({"SRP_bits": pa.binary(160)})
+  base_type = pa.binary(160)
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._upstream = self.bookstack.get_transform("SRP")
+
+  def upstream_documents(self) -> Iterator[pa.RecordBatch]:
+    # Yields one array per document.
+    yield from self.upstream()
+
+  def process_batch(self, batch : pa.RecordBatch) -> pa.Array:
+    return pa.FixedSizeBinaryArray.from_buffers(pa.binary(160), len(batch), pc.list_flatten(batch["SRP"]).buffers())
 
 class Ngrams(ArrowIdChunkedReservoir):
   def __init__(self, bookstack, ngrams: int, *args, **kwargs):
@@ -371,15 +385,16 @@ class EncodedTrigrams(EncodedCounts):
 transformations = {
   'text': Text,
   'document_lengths': DocumentLengths,
-  'unigrams': Unigrams,
   'tokenization': Tokenization,
-  'quintgrams': Quintgrams,
+  'unigrams': Unigrams,
   'bigrams': Bigrams,
   'trigrams': Trigrams,
   'quadgrams': Quadgrams,
+  'quintgrams': Quintgrams,
   'encoded_unigrams': EncodedUnigrams,
   'encoded_bigrams': EncodedBigrams,
-  'srp': SRP_Transform,
-  'encoded_trigrams': EncodedTrigrams
+  'encoded_trigrams': EncodedTrigrams,
+  'SRP': SRP_Transform,
+  'SRP_bits': SRP_bits,
 }
 

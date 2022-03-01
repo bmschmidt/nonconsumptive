@@ -54,6 +54,7 @@ class Corpus():
     format    -- The text format used ('txt', 'html', 'tei', 'md', etc.)
     compression -- Compression used on texts. Only '.gz' currently supported.
     total_batches -- how many chunks to process the corpus in.
+    bookstacks -- a list of bookstack names to use.
     this_batch -- the batch number we're in right now. For multiprocessing, etc. zero-indexed.
     """
 
@@ -168,6 +169,20 @@ class Corpus():
   def get_document(self, id):
     return Document(self, id)
 
+  def to_parquet(self, dir : Union[Path, str], transformations = ["unigrams", "document_length", "srp"], **kwargs):
+    """
+    Export the corpus as a parquet dataset, one file per bookstack.
+    * fields: the fields to export
+    * kwargs: passed to parquet.write_table
+
+    """
+    assert len(transformations) >= 0
+    dir = Path(dir)
+    if not dir.exists():
+      dir.mkdir()
+    for stack in self.bookstacks:
+      stack.to_parquet(dir, transformations, **kwargs)
+
   @property
   def total_wordcounts(self) -> pa.Table:
     if self._total_wordcounts is not None:
@@ -275,16 +290,9 @@ class Corpus():
       if ids is None:
         yield from transformation
       elif ids in {"@id", "nc:id"}:
-        yield from transformation.iter_with_ids(ids)
+        yield from transformation.doc_batches(ids)
       else:
-        raise ValueError(f'ids must be in {"@id", "nc:id"}')
-      
-  def to_parquet(self, transformations = ["unigrams", "document_length", "SRP"]):
-    # Writes a parquet file including derived metadata.
-    schema = self.metadata.load_processed_catalog(columns = None)
-    
-    parquet.ParquetFile(self.root / "export.parquet", )  
-    
+        raise ValueError(f'ids must be in {"@id", "nc:id"}')    
 
   @property
   def bookstacks(self):

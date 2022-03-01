@@ -63,9 +63,21 @@ class Bookstack():
       return self._metadata
     self._metadata = feather.read_table(fin)
     return self._metadata
+
   @property
   def bookstacks(self):
     raise RecursionError("A stack can't contain more stacks")
+
+  def to_parquet(self, dir, columns, **kwargs):
+    """
+    Export a bookstack to parquet.
+
+    Further arguments are passed to parquet.write_table
+    """
+    tb = self.metadata
+    for column in columns:
+      tb = tb.append_column("nc:" + column, self.get_transform(column).array)    
+    parquet.write_table(tb, f"{dir}/{self.uuid}.parquet", **kwargs)
 
   def get_transform(self, key):
     """
@@ -99,6 +111,7 @@ class Bookstacks:
         if mode == 'r':
           assert self.dir.is_dir()
         
+      
     @property
     def schema(self):
         f0, *_ = self.files()

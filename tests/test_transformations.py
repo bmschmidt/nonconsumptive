@@ -88,8 +88,13 @@ class TestSRP():
     d = dissertation_corpus.bookstacks[0]
     d.get_transform
     stack1 = Bookstack(dissertation_corpus, "00000")
-    srp = stack1.get_transform("srp")
-    for transformed in srp.iter_with_ids():
-        pass
+    srp = stack1.get_transform("SRP").table
+    srp['SRP'][0]
+
+  def test_srp_bits_instantiation(self, dissertation_corpus):
+    d = dissertation_corpus.bookstacks[0]
+    d.get_transform
+    stack1 = Bookstack(dissertation_corpus, "00000")
+    srp = stack1.get_transform("SRP_bits").table
     # Haven't yet determined the plan here.
-    transformed['SRP'][0]
+    srp['SRP_bits'][0]    

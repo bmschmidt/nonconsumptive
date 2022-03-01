@@ -224,6 +224,8 @@ class ArrowReservoir(Reservoir):
     tab = pa.Table.from_batches(self.cache).combine_chunks()
     # Deallocate just in case.
     self.cache = []
+    print(tab.schema)
+    print(self.arrow_schema)
     self.writer.write(tab)
     self.bytes = 0
 
@@ -271,7 +273,10 @@ class ArrowReservoir(Reservoir):
       yield batch
 
 class ArrowLineChunkedReservoir(ArrowReservoir):
-  def iter_with_ids(self, id_type = "@id"):
+  def doc_batches(self, id_type : str = "@id") -> Iterator[pa.RecordBatch]:
+    """
+    Iterate over the rows treating each document as a single recordBatch
+    """
     ids = self.bookstack.ids[id_type]
     ix = 0
     for i_, batch in enumerate(super().__iter__()):
@@ -295,8 +300,6 @@ class ArrowLineChunkedReservoir(ArrowReservoir):
       names = [f.name for f in batch.schema]
       for i in range(len(batch)):
         yield {name: batch[name][i] for name in names}
-#  def __iter__(self):
-#    yield from self.iter_with_ids()
 
 class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
   
@@ -329,11 +332,18 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
     if pa.types.is_struct(self.base_type):
       # The schema is a list of whatever the base_type here is.
       return pa.schema({
-#        self.name: pa.list_(self.base_type)
          self.name: self.base_type
-     })
+       })
+      # The schema is a list of whatever the base_type here is.
+    return pa.schema({
+         self.name: self.base_type
+     })     
     raise NotImplementedError(f"Unable to create line-by-line records for returned value of type {self.base_type}")
 
+  @property
+  def array(self):
+    return self.table.column(self.name)
+    
   def process_batch(self, batch: pa.RecordBatch) -> pa.RecordBatch:
     raise NotImplementedError("Must define a batch -> batch method")
 
@@ -385,8 +395,10 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
     offsets = pa.array(row_offsets, pa.int32())
     if pa.types.is_fixed_size_list(self.base_type):
       l = pa.FixedSizeListArray.from_arrays(values, self.base_type.list_size)
-    else:
+    elif pa.types.is_list(self.base_type):
       l = pa.ListArray.from_arrays(offsets, values)
+    else:
+      l = values
     yield pa.RecordBatch.from_arrays(
       [l],
       [self.name]
@@ -397,29 +409,30 @@ class ArrowIdChunkedReservoir(ArrowLineChunkedReservoir):
 #      for row in batch[self.name]:
 #        yield pa.record_batch(pc.list_flatten(row.values), [m.name for m in self.base_type])
 
-  def iter_with_ids(self, id = "nc:id"):
+  def doc_batches(self, id : str = "nc:id") -> Iterator[pa.RecordBatch]:
     # Slap an ID in front of the list.
     ids = self.bookstack.ids[id]
     offset = pa.scalar(0, pa.int32())
     for batch in self:
-      if pa.types.is_fixed_size_list(batch[self.name].type):
-        indices = pa.array(np.repeat(np.arange(0, len(batch)), 
-           self.base_type.list_size))
-      else:
-        indices = batch[self.name].value_parent_indices()      
-      try:
-        ids = pc.take(ids, pc.add(indices, offset))
-        if isinstance(ids, pa.ChunkedArray):
-          ids = ids.combine_chunks()
-        offset = pc.add(offset, pa.scalar(len(batch)))
-        if pa.types.is_struct(batch[self.name].type):
-          batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
+      if pa.types.is_list(batch[self.name].type or pa.types.is_fixed_size_list(batch[self.name].type)):
+        if pa.types.is_fixed_size_list(batch[self.name].type):
+          indices = pa.array(np.repeat(np.arange(0, len(batch)), 
+            self.base_type.list_size))
         else:
-          batch = pa.RecordBatch.from_arrays([batch[self.name].flatten()], [self.name])
-      except pa.ArrowIndexError:
-        print(offset)
-        print(pc.add(indices, offset))
-        print(len(ids))
-        raise
+          indices = batch[self.name].value_parent_indices()      
+        try:
+          ids = pc.take(ids, pc.add(indices, offset))
+          if isinstance(ids, pa.ChunkedArray):
+            ids = ids.combine_chunks()
+          offset = pc.add(offset, pa.scalar(len(batch)))
+          if pa.types.is_struct(batch[self.name].type):
+            batch = pa.RecordBatch.from_struct_array(batch[self.name].flatten())
+          else:
+            batch = pa.RecordBatch.from_arrays([batch[self.name].flatten()], [self.name])
+        except pa.ArrowIndexError:
+          print(offset)
+          print(pc.add(indices, offset))
+          print(len(ids))
+          raise        
       yield pa.record_batch([ids, *batch.columns],
              [id, *[f.name for f in batch.schema]])

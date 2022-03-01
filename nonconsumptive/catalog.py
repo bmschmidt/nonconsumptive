@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__ import annotations # For 3.8 or something.
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -26,9 +26,60 @@ import nonconsumptive as nc
 import regex as re
 import logging
 from .bookstack import Bookstacks
+import yaml
+import pyarrow.types as pt
 
 logger = logging.getLogger("nonconsumptive")
 nc_schema_version = 0.1
+
+"""
+
+"""
+
+from pathlib import Path
+from typing import List, Union, Optional
+from collections import Counter, defaultdict
+
+def resolve_type_confusion(typelist, name):
+    if (len(typelist)==1):
+        return typelist[0]
+    for i, (label, count) in enumerate(typelist):
+        print(f"({i}) {label} -- {count} occurrences.")
+    tnum = int(input(f"Choose a type for {name}: "))
+    return typelist[tnum][0]
+
+class MessyParquetCorpus:
+    """
+    Preliminary work to clean a corpus from parquet files.
+    """
+    def __init__(self, _sentinel = None, 
+                 dir : Optional[Union[Path, str]] = None,
+                 files : Optional[List[Union[Path, str]]] = None):
+        if _sentinel is not None:
+            raise ArgumentError("Must pass 'dir' or 'files' argument")
+        assert dir is None or files is None
+        if files is not None:
+            self.files = [f for f in files]
+        elif dir is not None:
+            self.files = [f for f in Path(dir).glob("*.parquet")]
+        else:
+            raise ArgumentError("Must pass 'dir' or 'files' argument")
+            
+    def col_types(self):
+        typecounts = defaultdict(Counter)
+        for file in self.files:
+            for field in pa.parquet.ParquetFile(file).schema_arrow:
+                typecounts[field.name][field.type] += 1
+        coerce = dict()
+        for name, types in typecounts.items():
+            if len(types) == 1:
+                coerce[name] = types.most_common()[0][0]
+            else:
+                coerce[name] = resolve_type_confusion(types.most_common(5), name)
+        return coerce
+        return typecounts
+        
+
 
 def ingest_json(file : Path, write_dir : Path) -> pa.Table:
 
